@@ -1,0 +1,13 @@
+# Input/output data — large raw files, not source
+input/
+output/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
