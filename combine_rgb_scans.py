@@ -64,6 +64,7 @@ def combine_triplet(red_path, green_path, blue_path, output_path):
     with rawpy.imread(str(red_path)) as raw_r:
         bayer_pattern = raw_r.raw_pattern.copy()
         bayer_data_r = raw_r.raw_image.copy().astype(np.uint16)
+        sizes = raw_r.sizes
 
     print(f"  Reading G: {green_path.name}")
     with rawpy.imread(str(green_path)) as raw_g:
@@ -97,9 +98,12 @@ def combine_triplet(red_path, green_path, blue_path, output_path):
     merged[G1row::2, G1col::2] = G2_data
     merged[Brow::2, Bcol::2] = B_data
 
-    # Crop to active area (6000x4000 for Sony ILCE-7M3, removing border padding)
-    crop_height, crop_width = 4000, 6000
-    merged = merged[:crop_height, :crop_width]
+    # Crop to active sensor area using margins from the raw file
+    top = sizes.top_margin
+    left = sizes.left_margin
+    crop_height = sizes.height
+    crop_width = sizes.width
+    merged = merged[top:top + crop_height, left:left + crop_width]
 
     # Build blacklevel array shaped to match Bayer pattern
     bayer_pattern_copy = bayer_pattern.copy()

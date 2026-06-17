@@ -62,4 +62,4 @@ trichromatic2108_combined.dng
 
 ## Camera support
 
-Currently hardcoded for the **Sony ILCE-7M3** (active sensor area 6000×4000). The Bayer pattern, color matrices, black/white levels, and white balance are read from the source ARW files via `rawpy` and `pyexiv2`.
+The Bayer pattern, color matrices, black/white levels, white balance, and active sensor area are all read directly from the source RAW files via `rawpy` and `pyexiv2` — no camera-specific configuration required. Tested on the Sony ILCE-7M3; any camera supported by libraw should work.
