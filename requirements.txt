@@ -2,3 +2,5 @@ rawpy
 tifffile
 pyexiv2
 numpy
+pyserial
+scipy

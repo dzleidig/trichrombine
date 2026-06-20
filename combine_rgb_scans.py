@@ -96,7 +96,47 @@ def extract_bayer_channel(raw_image, bayer_pattern, channel_index):
     return raw_image[row::2, col::2], row, col
 
 
-def combine_triplet(red_path, green_path, blue_path, output_path, filmbase_neutrals=None):
+def compute_lcc_map(lcc_path, bayer_pattern, raw_shape):
+    """
+    Compute a luminance-only light falloff map from a flat-field ARW (lcc.ARW).
+
+    Averages all four Bayer channels (after black subtraction) to get a channel-
+    agnostic falloff pattern, smooths it heavily to remove grain, and normalizes
+    so the maximum value is 1.0. Returns a float32 array at photosite resolution
+    matching raw_shape // 2 in each dimension.
+    """
+    from scipy.ndimage import uniform_filter
+
+    with rawpy.imread(str(lcc_path)) as raw:
+        lcc_image = raw.raw_image.copy().astype(np.float32)
+        bl = raw.black_level_per_channel
+
+    h2, w2 = raw_shape[0] // 2, raw_shape[1] // 2
+    channels = []
+    for ch_idx in range(4):
+        positions = np.argwhere(bayer_pattern == ch_idx)
+        if len(positions) == 0:
+            continue
+        row, col = int(positions[0][0]), int(positions[0][1])
+        ch = lcc_image[row::2, col::2]
+        ch = ch[:h2, :w2] - bl[ch_idx]
+        channels.append(np.maximum(ch, 0))
+
+    lcc_map = np.mean(channels, axis=0).astype(np.float32)
+
+    # Smooth heavily to remove sensor grain while preserving the falloff shape.
+    lcc_map = uniform_filter(lcc_map, size=201)
+
+    max_val = lcc_map.max()
+    if max_val <= 0:
+        raise ValueError("LCC frame appears to be black — check the file.")
+    lcc_map /= max_val  # normalize: center (brightest) = 1.0
+
+    return lcc_map
+
+
+def combine_triplet(red_path, green_path, blue_path, output_path,
+                    filmbase_neutrals=None, lcc_path=None):
     """
     Extract R from red_path, G from green_path, B from blue_path,
     recombine into a single Bayer array, and write as DNG.
@@ -130,6 +170,35 @@ def combine_triplet(red_path, green_path, blue_path, output_path, filmbase_neutr
     print(f"  G  max={np.amax(G_data)}  min={np.amin(G_data)}")
     print(f"  G2 max={np.amax(G2_data)} min={np.amin(G2_data)}")
     print(f"  B  max={np.amax(B_data)}  min={np.amin(B_data)}")
+
+    bl_r  = float(BlackLevel_perChannel[0])
+    bl_g  = float(BlackLevel_perChannel[1])
+    bl_b  = float(BlackLevel_perChannel[2])
+    bl_g2 = float(BlackLevel_perChannel[3])
+
+    def _scale(data, black, scale):
+        out = (data.astype(np.float32) - black) * scale + black
+        return np.clip(out, 0, WhiteLevel).astype(np.uint16)
+
+    # Scale all channels to the minimum Dmin median so film base is exactly neutral.
+    # Using min() means we only scale down — never up — so no risk of clipping.
+    if filmbase_neutrals is not None:
+        med_r, med_g, med_b = filmbase_neutrals
+        target = min(med_r, med_g, med_b)
+        R_data  = _scale(R_data,  bl_r,  target / med_r)
+        G_data  = _scale(G_data,  bl_g,  target / med_g)
+        G2_data = _scale(G2_data, bl_g2, target / med_g)
+        B_data  = _scale(B_data,  bl_b,  target / med_b)
+
+    # Apply flat-field (LCC) correction for light falloff.
+    # Uses a single luminance map averaged across all Bayer channels so only
+    # vignetting is corrected — no per-channel color cast adjustment.
+    if lcc_path is not None:
+        lcc_map = compute_lcc_map(lcc_path, bayer_pattern, bayer_data_r.shape)
+        for data, black in [(R_data, bl_r), (G_data, bl_g), (G2_data, bl_g2), (B_data, bl_b)]:
+            signal = data.astype(np.float32) - black
+            corrected = np.clip(signal / lcc_map + black, 0, WhiteLevel)
+            data[:] = corrected.astype(np.uint16)
 
     # Start with the blue frame's raw data as the base array (has correct metadata)
     # then overwrite each channel's photosites with data from the correct exposure
@@ -210,13 +279,14 @@ def combine_triplet(red_path, green_path, blue_path, output_path, filmbase_neutr
     dng_extratags.append(('DNGVersion', 'B', 4, [1, 4, 0, 0]))
     dng_extratags.append(('DNGBackwardVersion', 'B', 4, [1, 4, 0, 0]))
 
-    # AsShotNeutral: G-normalized reciprocals (G/R, 1, G/B).
-    # If film base neutrals are provided, derive from those (correct for narrowband scanning).
-    # Otherwise fall back to camera white balance (arbitrary, but better than nothing).
+    # AsShotNeutral tells the RAW processor what channel values correspond to neutral gray.
+    # The processor derives WB multipliers as 1/AsShotNeutral per channel.
+    # When filmbase_neutrals is provided, raw data is already scaled so film base R=G=B,
+    # so [1, 1, 1] means no further WB adjustment is needed.
+    # Without filmbase_neutrals, fall back to camera WB from the blue frame.
     if filmbase_neutrals is not None:
-        med_r, med_g, med_b = filmbase_neutrals
-        wb_r = med_r / med_g   # R_neutral / G_neutral  (< 1; raw processor inverts to get boost)
-        wb_b = med_b / med_g   # B_neutral / G_neutral  (< 1)
+        wb_r = 1.0
+        wb_b = 1.0
     else:
         wb_r = WB_AsShot[1] / WB_AsShot[0]
         wb_b = WB_AsShot[1] / WB_AsShot[2]
@@ -287,7 +357,8 @@ def find_triplets(input_dir, min_age_seconds=2.0, quiet=False):
     return triplets
 
 
-def run_watch_loop(input_dir, output_dir, interval, min_age_seconds, do_move, filmbase_neutrals=None):
+def run_watch_loop(input_dir, output_dir, interval, min_age_seconds, do_move,
+                   filmbase_neutrals=None, lcc_path=None):
     """Poll input_dir and process new ARW triplets as they arrive."""
     processed_set = set()
 
@@ -304,7 +375,8 @@ def run_watch_loop(input_dir, output_dir, interval, min_age_seconds, do_move, fi
             output_path = output_dir / output_name
             print(f"[watch] {red.name} + {green.name} + {blue.name}")
             try:
-                combine_triplet(red, green, blue, output_path, filmbase_neutrals=filmbase_neutrals)
+                combine_triplet(red, green, blue, output_path,
+                                filmbase_neutrals=filmbase_neutrals, lcc_path=lcc_path)
                 processed_set.add((red.name, green.name, blue.name))
                 if do_move:
                     move_to_processed([red, green, blue], input_dir)
@@ -326,6 +398,9 @@ def main():
                     help='Poll interval in seconds for --watch mode (default: 5)')
     ap.add_argument('--move', action='store_true',
                     help='Move processed ARW files to <input>/processed/ after successful combine')
+    ap.add_argument('--lcc', metavar='PATH',
+                    help='Path to a flat-field ARW (e.g. lcc.ARW) for light falloff correction. '
+                         'Applied uniformly to all channels (luminance only, no color correction).')
     ap.add_argument('--filmbase', metavar='PATH',
                     help='Directory containing a film base ARW triplet (R, G, B order). '
                          'When provided, AsShotNeutral is derived from film base channel '
@@ -340,6 +415,13 @@ def main():
         sys.exit(1)
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    lcc_path = Path(args.lcc) if args.lcc else None
+    if lcc_path and not lcc_path.exists():
+        print(f"ERROR: LCC file not found: {lcc_path}")
+        sys.exit(1)
+    if lcc_path:
+        print(f"LCC flat-field: {lcc_path}\n")
 
     filmbase_neutrals = None
     if args.filmbase:
@@ -365,7 +447,7 @@ def main():
         try:
             run_watch_loop(input_dir, output_dir, args.interval,
                            min_age_seconds=2.0, do_move=args.move,
-                           filmbase_neutrals=filmbase_neutrals)
+                           filmbase_neutrals=filmbase_neutrals, lcc_path=lcc_path)
         except KeyboardInterrupt:
             print("\nWatch mode stopped.")
         return
@@ -384,7 +466,8 @@ def main():
         output_path = output_dir / output_name
         print(f"[{i}/{len(triplets)}] {red.stem} + {green.stem} + {blue.stem}")
         try:
-            combine_triplet(red, green, blue, output_path, filmbase_neutrals=filmbase_neutrals)
+            combine_triplet(red, green, blue, output_path,
+                            filmbase_neutrals=filmbase_neutrals, lcc_path=lcc_path)
             if args.move:
                 move_to_processed([red, green, blue], input_dir)
         except Exception as e:
