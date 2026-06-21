@@ -19,26 +19,22 @@ Options:
 """
 
 import argparse
-import glob
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-
-try:
-    import serial
-    import serial.tools.list_ports
-except ImportError:
-    sys.exit("pyserial not installed. Run: pip3 install pyserial")
-
-BAUD_RATE = 115200
-PACKET_START = 0xFE
-PKT_H2D_SET_COLOR = 0x00
-
-CAPTURE_ONE_APP = "Capture One"
+from .scanner import (
+    BAYER_INDEX,
+    CLIP_THRESHOLD,
+    OFF,
+    PROBE_BRIGHTNESS,
+    Scanlight,
+    find_scanlight_port,
+    sample_channel_median,
+    trigger_capture,
+    wait_for_new_file,
+)
 
 CHANNELS = {
     'R': (255,   0,   0,   0,   0),
@@ -54,124 +50,11 @@ CHANNEL_NAMES = {
     'W': 'White',
 }
 
-BAYER_INDEX = {'R': 0, 'G': 1, 'B': 2}
 
-OFF = (0, 0, 0, 0, 0)
-
-
-def build_set_color_packet(r, g, b, w, ir, brightness):
-    scale = brightness / 255
-    values = [int(v * scale) for v in (r, g, b, w, ir)]
-    data = bytes(values) + b'\x00'  # save_preset = 0
-    return bytes([PACKET_START, PKT_H2D_SET_COLOR, len(data)]) + data
-
-
-def find_scanlight_port():
-    candidates = []
-    for port in serial.tools.list_ports.comports():
-        desc = (port.description or '').lower()
-        mfr = (port.manufacturer or '').lower()
-        if any(k in desc or k in mfr for k in ('pico', 'rp2', 'raspberry', 'cdc')):
-            candidates.append(port.device)
-    if not candidates:
-        candidates = sorted(glob.glob('/dev/cu.usbmodem*'))
-    if not candidates:
-        sys.exit(
-            "Could not auto-detect scanlight serial port.\n"
-            "Connect the scanlight and retry, or pass --port /dev/cu.usbmodemXXXX"
-        )
-    if len(candidates) > 1:
-        print(f"Multiple serial ports found: {candidates}")
-        print(f"Using {candidates[0]} — pass --port to override.")
-    return candidates[0]
-
-
-def set_color(ser, r, g, b, w, ir, brightness, dry_run):
-    packet = build_set_color_packet(r, g, b, w, ir, brightness)
-    if dry_run:
-        print(f"  [dry-run] serial write: {packet.hex()}")
-    else:
-        ser.write(packet)
-        ser.flush()
-
-
-def trigger_capture(dry_run):
-    script = f'tell application "{CAPTURE_ONE_APP}" to capture'
-    if dry_run:
-        print(f"  [dry-run] osascript: {script}")
-        return True
-    result = subprocess.run(
-        ['osascript', '-e', script],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"  WARNING: AppleScript error: {result.stderr.strip()}")
-        return False
-    return True
-
-
-def wait_for_new_file(watch_dir, before, timeout):
-    """Wait for a new ARW file to appear in watch_dir. Returns the filename or None on timeout."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            after = set(f for f in os.listdir(watch_dir) if f.upper().endswith('.ARW') and not f.startswith('.') and not f.startswith('.'))
-        except FileNotFoundError:
-            time.sleep(0.1)
-            continue
-        new = after - before
-        if new:
-            name = next(iter(new))
-            print(f"  File landed: {name}")
-            return name
-        time.sleep(0.1)
-    print(f"  WARNING: no new file after {timeout}s, continuing anyway.")
-    return None
-
-
-def sample_channel_median(path, ch_idx):
-    """
-    Read an ARW and return the median pixel value for the given Bayer channel index
-    sampled from the center 175x175 camera-pixel region, after black level subtraction.
-    """
-    try:
-        import rawpy
-        import numpy as np
-    except ImportError:
-        sys.exit("rawpy and numpy are required for --calibrate. Run: pip3 install rawpy numpy")
-
-    with rawpy.imread(str(path)) as raw:
-        pattern = raw.raw_pattern.copy()
-        image = raw.raw_image.copy().astype(np.float32)
-        sizes = raw.sizes
-        black = raw.black_level_per_channel
-
-    positions = (pattern == ch_idx).nonzero()
-    row, col = int(positions[0][0]), int(positions[1][0])
-    channel_data = image[row::2, col::2]
-
-    top = sizes.top_margin // 2
-    left = sizes.left_margin // 2
-    h = sizes.height // 2
-    w = sizes.width // 2
-    channel_data = channel_data[top:top + h, left:left + w]
-
-    half = 87
-    ch_center = h // 2
-    cw_center = w // 2
-    channel_data = channel_data[ch_center - half:ch_center + half, cw_center - half:cw_center + half]
-
-    channel_data = channel_data - black[ch_idx]
-    return float(np.median(channel_data))
-
-
-CLIP_THRESHOLD = 13000
-
-
-def shoot_and_sample(ser, args, ch, brightness):
+def shoot_and_sample(scanlight, args, ch, brightness):
     """Set a single channel, trigger capture, wait for ARW, return (filename, median)."""
     r, g, b, w, ir = CHANNELS[ch]
-    set_color(ser, r, g, b, w, ir, brightness, args.dry_run)
+    scanlight.set_color(r, g, b, w, ir, brightness)
     time.sleep(args.stabilize)
 
     try:
@@ -179,8 +62,8 @@ def shoot_and_sample(ser, args, ch, brightness):
     except FileNotFoundError:
         before = set()
 
-    trigger_capture(args.dry_run)
-    filename = wait_for_new_file(args.watch_dir, before, timeout=args.capture_wait)
+    ok = trigger_capture(args.dry_run)
+    filename = wait_for_new_file(args.watch_dir, before, timeout=args.capture_wait) if ok else None
     if filename is None:
         sys.exit(f"Calibration failed: no file appeared for {ch} channel at brightness {brightness}.")
 
@@ -189,10 +72,7 @@ def shoot_and_sample(ser, args, ch, brightness):
     return filename, median
 
 
-PROBE_BRIGHTNESS = 20
-
-
-def run_calibration(ser, args):
+def run_calibration(scanlight, args):
     """
     Find the maximum non-clipping brightness for each channel independently.
 
@@ -216,7 +96,7 @@ def run_calibration(ser, args):
     while True:
         # Single shot with all RGB LEDs on — reads all three Bayer channels at once.
         print(f"Probing all channels at brightness {probe_bv}...")
-        set_color(ser, 255, 255, 255, 0, 0, probe_bv, args.dry_run)
+        scanlight.set_color(255, 255, 255, 0, 0, probe_bv)
         time.sleep(args.stabilize)
         try:
             before = set(f for f in os.listdir(args.watch_dir)
@@ -227,7 +107,7 @@ def run_calibration(ser, args):
         filename = wait_for_new_file(args.watch_dir, before, timeout=args.capture_wait)
         if filename is None:
             sys.exit("Calibration probe failed: no file appeared.")
-        set_color(ser, *OFF, 255, args.dry_run)
+        scanlight.set_color(*OFF, 255)
 
         probe_path = Path(args.watch_dir) / filename
         for ch in 'RGB':
@@ -256,7 +136,7 @@ def run_calibration(ser, args):
 
         while True:
             print(f"[{ch}] Shooting at brightness {brightness}...")
-            filename, median = shoot_and_sample(ser, args, ch, brightness)
+            filename, median = shoot_and_sample(scanlight, args, ch, brightness)
             path = Path(args.watch_dir) / filename
             all_calibration_paths.append(path)
             print(f"[{ch}] {filename}  median={median:.1f}")
@@ -284,7 +164,7 @@ def run_calibration(ser, args):
                 final_paths[ch] = path
                 break
 
-        set_color(ser, *OFF, 255, args.dry_run)
+        scanlight.set_color(*OFF, 255)
 
     print("=== Calibration result ===")
     for ch in 'RGB':
@@ -304,12 +184,11 @@ def run_calibration(ser, args):
     return final_brightnesses, filmbase_neutrals
 
 
-def capture_sequence(ser, args, brightnesses):
+def capture_sequence(scanlight, args, brightnesses):
     """
     Shoot R, G, B in sequence. Returns a dict {ch: Path} of captured ARW files,
     or an empty dict if watch_dir is not set.
     """
-    dry_run = args.dry_run
     channels = args.channels.upper()
     captured = {}
 
@@ -318,22 +197,22 @@ def capture_sequence(ser, args, brightnesses):
         r, g, b, w, ir = CHANNELS[ch]
         bv = brightnesses.get(ch, args.brightness)
         print(f"[{ch}] Setting {name} channel (brightness {bv})...")
-        set_color(ser, r, g, b, w, ir, bv, dry_run)
+        scanlight.set_color(r, g, b, w, ir, bv)
 
         time.sleep(args.stabilize)
 
-        if args.watch_dir and not dry_run:
+        if args.watch_dir and not args.dry_run:
             try:
                 before = set(f for f in os.listdir(args.watch_dir) if f.upper().endswith('.ARW') and not f.startswith('.'))
             except FileNotFoundError:
                 before = set()
 
         print(f"[{ch}] Triggering capture in Capture One...")
-        ok = trigger_capture(dry_run)
+        ok = trigger_capture(args.dry_run)
         if not ok:
             print(f"[{ch}] Capture may have failed — continuing anyway.")
 
-        if args.watch_dir and not dry_run:
+        if args.watch_dir and not args.dry_run:
             print(f"[{ch}] Waiting for file in {args.watch_dir}...")
             filename = wait_for_new_file(args.watch_dir, before, timeout=args.capture_wait)
             if filename:
@@ -344,7 +223,7 @@ def capture_sequence(ser, args, brightnesses):
         print(f"[{ch}] Done.\n")
 
     print("All channels captured. Turning off LEDs.")
-    set_color(ser, *OFF, 255, dry_run)
+    scanlight.set_color(*OFF, 255)
 
     return captured
 
@@ -372,16 +251,13 @@ def combine_frame(captured, output_dir, frame_num, filmbase_neutrals=None, lcc_p
 
 
 def run_sequence(args):
-    dry_run = args.dry_run
-
-    if dry_run:
-        ser = None
+    if args.dry_run:
         print("=== DRY RUN — no hardware will be touched ===\n")
+        scanlight = Scanlight(None, dry_run=True)
     else:
         port = args.port or find_scanlight_port()
         print(f"Connecting to scanlight on {port}...")
-        ser = serial.Serial(port, BAUD_RATE, timeout=1)
-        time.sleep(0.5)
+        scanlight = Scanlight(port, dry_run=False)
         print("Connected.\n")
 
     channels = args.channels.upper()
@@ -406,32 +282,29 @@ def run_sequence(args):
 
     try:
         if args.calibrate:
-            brightnesses, filmbase_neutrals = run_calibration(ser, args)
-            set_color(ser, 0, 0, 0, args.preview_brightness, 0, 255, dry_run)
+            brightnesses, filmbase_neutrals = run_calibration(scanlight, args)
+            scanlight.set_color(0, 0, 0, args.preview_brightness, 0, 255)
 
         if args.loop:
             frame = 1
             while True:
                 input(f"Frame {frame} — press Enter to capture (Ctrl+C to quit)...")
-                captured = capture_sequence(ser, args, brightnesses)
+                captured = capture_sequence(scanlight, args, brightnesses)
                 if captured and output_dir:
                     combine_frame(captured, output_dir, frame, filmbase_neutrals, lcc_path)
                 frame += 1
                 # White preview light so the film is visible while advancing
-                set_color(ser, 0, 0, 0, args.preview_brightness, 0, 255, dry_run)
+                scanlight.set_color(0, 0, 0, args.preview_brightness, 0, 255)
         else:
-            captured = capture_sequence(ser, args, brightnesses)
+            captured = capture_sequence(scanlight, args, brightnesses)
             if captured and output_dir:
                 combine_frame(captured, output_dir, 1, filmbase_neutrals, lcc_path)
 
     except KeyboardInterrupt:
         print("\nInterrupted — turning off LEDs.")
-        if not dry_run:
-            set_color(ser, *OFF, 255, dry_run)
+        scanlight.set_color(*OFF, 255)
     finally:
-        if ser:
-            time.sleep(1.0)
-            ser.close()
+        scanlight.close()
 
 
 def main():

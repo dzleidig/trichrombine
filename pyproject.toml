@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trichrom"
+version = "0.1.0"
+description = "RGB film scanning via Scanlight + Sony A7III"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Dylan Leidig", email = "dzleidig@gmail.com"}
+]
+
+dependencies = [
+    "numpy",
+    "rawpy",
+    "tifffile",
+    "pyexiv2",
+    "pyserial",
+    "scipy",
+]
+
+[project.scripts]
+trichrom-capture = "trichrom.rgb_capture:main"
+trichrom-calibrate = "trichrom.calibrate_rgb:main"
+trichrom-combine = "trichrom.combine_rgb_scans:main"
+trichrom-correct = "trichrom.correct_crosstalk:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+package-data = {trichrom = []}
