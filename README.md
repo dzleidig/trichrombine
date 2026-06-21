@@ -1,4 +1,4 @@
-# trichrom
+# trichrombine
 
 RGB film scanning via Scanlight LED controller + Sony A7III + Capture One.
 
