@@ -1,7 +1,26 @@
 #!/usr/bin/env python3
+"""
+Apply crosstalk correction to single-shot RGB scans.
+
+LEDs in single-shot scanning have non-zero spectral overlap — when the red LED
+fires, it also excites the green and blue photosites (crosstalk). This tool
+loads a crosstalk matrix and applies its inverse to correct the captured pixel
+values.
+
+Usage:
+    trichrom-correct --input INPUT.ARW --output OUTPUT.DNG [--matrix crosstalk.csv]
+    trichrom-correct --watch WATCH_DIR [--output OUTPUT_DIR] [--matrix crosstalk.csv]
+
+Single-file mode processes one ARW and writes a corrected DNG. Watch mode
+monitors a directory for new ARW files, processes them continuously, and moves
+originals to a processed/ subfolder.
+
+The crosstalk matrix is loaded from a CSV file (--matrix) produced by
+trichrom-measure-crosstalk, or falls back to hardcoded measurements for the
+Sony A7III + Scanlight (see test_images/crosstalk.csv).
+"""
 
 import argparse
-import struct
 import sys
 import time
 import traceback
@@ -11,69 +30,35 @@ import numpy as np
 import rawpy
 import tifffile
 import pyexiv2
-from scipy.ndimage import map_coordinates
 
-from .combine_rgb_scans import extract_bayer_channel, cm_to_flatrational, is_file_stable, move_to_processed
+from .legacy.combine_rgb_scans import extract_bayer_channel, cm_to_flatrational, is_file_stable, move_to_processed
 
-# Measured from test_images/{RED,GREEN,BLUE}.ARW for the Sony A7III + Scanlight.
+# Measured from test_images/crosstalk/channel_calibration/ for the Sony A7III + Scanlight.
 # Each column is one channel's crosstalk into all three sensor outputs, normalized
 # so the diagonal (correct-channel response) is 1.0.
-_MEASURED_M = np.array([
+_FALLBACK_M = np.array([
     [1.0000, 0.1452, 0.0651],
     [0.1455, 1.0000, 0.4514],
     [0.0416, 0.2273, 1.0000],
 ], dtype=np.float64)
 
-_DEFAULT_ICC_INPUT = Path(__file__).parent.parent.parent / "GenericDngFile-Neutral.icm"
-
-
-def measure_crosstalk(red_path, green_path, blue_path):
-    medians = []
-    for path, ch_idx in [(red_path, 0), (green_path, 1), (blue_path, 2)]:
-        with rawpy.imread(str(path)) as raw:
-            pattern = raw.raw_pattern.copy()
-            image = raw.raw_image.copy().astype(np.float32)
-            sizes = raw.sizes
-            black = raw.black_level_per_channel
-
-        row_medians = []
-        for out_idx in range(3):
-            data, _, _ = extract_bayer_channel(image, pattern, out_idx)
-            at = sizes.top_margin // 2
-            al = sizes.left_margin // 2
-            ah = sizes.height // 2
-            aw = sizes.width // 2
-            data = data[at:at + ah, al:al + aw]
-            half = 200
-            ch = ah // 2
-            cw = aw // 2
-            data = data[ch - half:ch + half, cw - half:cw + half]
-            data = data.astype(np.float64) - black[out_idx]
-            row_medians.append(float(np.median(data)))
-        medians.append(row_medians)
-
-    M_raw = np.array(medians, dtype=np.float64).T
-    return M_raw / M_raw.diagonal()
-
-
-def _add_matrix_args(ap):
-    ap.add_argument('--red', type=Path, help='Red-only calibration ARW (for measuring crosstalk)')
-    ap.add_argument('--green', type=Path, help='Green-only calibration ARW (for measuring crosstalk)')
-    ap.add_argument('--blue', type=Path, help='Blue-only calibration ARW (for measuring crosstalk)')
-
 
 def _resolve_matrix(args):
-    if args.red or args.green or args.blue:
-        if not (args.red and args.green and args.blue):
-            raise ValueError("--red, --green, and --blue must all be provided together")
-        print("Measuring crosstalk from calibration exposures...")
-        M = measure_crosstalk(args.red, args.green, args.blue)
-        print("Crosstalk matrix M (normalized):")
+    """
+    Resolve and return the inverse crosstalk matrix M⁻¹.
+
+    Loads M from --matrix CSV if provided, otherwise falls back to the
+    hardcoded matrix measured for the Sony A7III + Scanlight.
+    """
+    if args.matrix:
+        print(f"Loading crosstalk matrix from {args.matrix}")
+        M = np.loadtxt(args.matrix, delimiter=',')
+        print("Crosstalk matrix M:")
         for row in M:
             print("  " + "  ".join(f"{v:.4f}" for v in row))
     else:
-        print("Using hardcoded crosstalk matrix from test_images measurements")
-        M = _MEASURED_M
+        print("Using hardcoded crosstalk matrix (Sony A7III + Scanlight). Pass --matrix to override.")
+        M = _FALLBACK_M
 
     M_inv = np.linalg.inv(M)
     print("Correction matrix M⁻¹:")
@@ -88,6 +73,14 @@ def _resolve_matrix(args):
 # ---------------------------------------------------------------------------
 
 def correct_crosstalk(input_path, output_path, M_inv):
+    """
+    Apply crosstalk correction to a single-shot ARW and write a corrected DNG.
+
+    Read the RAW file, extract per-channel data, apply M⁻¹ to correct for
+    crosstalk, and write the result as a DNG with metadata preserved. The
+    output includes the color matrix and white balance from the original, so
+    it can be correctly color-corrected in downstream processing.
+    """
     print(f"  Reading: {input_path.name}")
     with rawpy.imread(str(input_path)) as raw:
         bayer_pattern = raw.raw_pattern.copy()
@@ -210,6 +203,14 @@ def correct_crosstalk(input_path, output_path, M_inv):
 
 
 def run_watch_loop(watch_dir, output_dir, M_inv, interval=5.0):
+    """
+    Continuously watch a directory for new ARW files and correct them.
+
+    Poll watch_dir every 'interval' seconds for stable ARW files (fully written
+    and not currently being modified). For each new file, apply crosstalk
+    correction and move the original to watch_dir/processed/. Errors are logged
+    and the file is left in place for retry.
+    """
     processed = set()
     print(f"[watch] Watching {watch_dir}  →  {output_dir}")
 
@@ -233,12 +234,14 @@ def run_watch_loop(watch_dir, output_dir, M_inv, interval=5.0):
 
 
 def main():
+    """CLI entry point: parse arguments and run single-file or watch mode."""
     ap = argparse.ArgumentParser(description='Apply crosstalk correction to single-shot ARW.')
     ap.add_argument('--input', help='Input ARW file (single-shot, all LEDs on)')
     ap.add_argument('--output', help='Output DNG file path (single-file mode) or output folder (watch mode)')
     ap.add_argument('--watch', metavar='DIR', help='Watch folder for new ARWs and process automatically')
     ap.add_argument('--interval', type=float, default=5.0, help='Poll interval in seconds for --watch (default: 5)')
-    _add_matrix_args(ap)
+    ap.add_argument('--matrix', type=Path, metavar='FILE',
+                    help='Crosstalk matrix CSV from trichrom-measure-crosstalk (default: built-in A7III+Scanlight values)')
     args = ap.parse_args()
 
     if not args.input and not args.watch:
@@ -259,109 +262,13 @@ def main():
         if not input_path.exists():
             print(f"ERROR: Input file not found: {input_path}")
             sys.exit(1)
-        output_path = Path(args.output) if args.output else input_path.with_suffix('_corrected.dng')
+        output_path = Path(args.output) if args.output else input_path.with_name(input_path.stem + '_corrected.dng')
         try:
             correct_crosstalk(input_path, output_path, M_inv)
         except Exception as e:
             print(f"ERROR: {e}")
             traceback.print_exc()
             sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Option B: bake correction into ICC CLUT (kept for reference)
-# ---------------------------------------------------------------------------
-
-def _find_a2b0(data):
-    tag_count = struct.unpack_from('>I', data, 128)[0]
-    for i in range(tag_count):
-        off = 132 + i * 12
-        if data[off:off + 4] == b'A2B0':
-            tag_offset = struct.unpack_from('>I', data, off + 4)[0]
-            tag_size = struct.unpack_from('>I', data, off + 8)[0]
-            return tag_offset, tag_size
-    raise ValueError("No A2B0 tag found in ICC profile")
-
-
-def _parse_mft2(lut_bytes):
-    assert lut_bytes[0:4] == b'mft2', f"Expected mft2, got {lut_bytes[0:4]}"
-    in_ch = lut_bytes[8]
-    out_ch = lut_bytes[9]
-    grid_pts = lut_bytes[10]
-    in_entries = struct.unpack_from('>H', lut_bytes, 48)[0]
-
-    in_table_start = 52
-    in_table_bytes = in_ch * in_entries * 2
-    clut_start = in_table_start + in_table_bytes
-    clut_bytes_count = grid_pts ** in_ch * out_ch * 2
-    out_entries = struct.unpack_from('>H', lut_bytes, 50)[0]
-    out_table_start = clut_start + clut_bytes_count
-    out_table_bytes = out_ch * out_entries * 2
-
-    clut_raw = np.frombuffer(lut_bytes[clut_start:clut_start + clut_bytes_count], dtype='>u2').astype(np.float64) / 65535.0
-    clut = clut_raw.reshape(grid_pts, grid_pts, grid_pts, out_ch)
-
-    return {
-        'header': lut_bytes[:in_table_start],
-        'in_table': lut_bytes[in_table_start:clut_start],
-        'clut': clut,
-        'out_table': lut_bytes[out_table_start:out_table_start + out_table_bytes],
-        'grid_pts': grid_pts,
-        'out_ch': out_ch,
-    }
-
-
-def _bake_correction(clut, M_inv, grid_pts, out_ch):
-    coords = np.linspace(0, 1, grid_pts)
-    R, G, B = np.meshgrid(coords, coords, coords, indexing='ij')
-    pts = np.stack([R, G, B], axis=-1)
-
-    corrected_pts = np.clip(pts @ M_inv.T, 0, 1) * (grid_pts - 1)
-    coords_for_map = corrected_pts.transpose(3, 0, 1, 2)
-
-    new_clut = np.zeros_like(clut)
-    for ch in range(out_ch):
-        new_clut[..., ch] = map_coordinates(clut[..., ch], coords_for_map, order=1, mode='nearest')
-    return new_clut
-
-
-def bake_crosstalk_icc(input_path, output_path, M_inv):
-    data = bytearray(input_path.read_bytes())
-    tag_offset, tag_size = _find_a2b0(data)
-    lut_bytes = bytes(data[tag_offset:tag_offset + tag_size])
-    parsed = _parse_mft2(lut_bytes)
-
-    print(f"CLUT grid: {parsed['grid_pts']}³, {parsed['out_ch']} output channels")
-    print("Baking correction matrix into CLUT...")
-
-    new_clut_bytes = (np.clip(_bake_correction(parsed['clut'], M_inv, parsed['grid_pts'], parsed['out_ch']), 0, 1) * 65535.0 + 0.5).astype(np.uint16).astype('>u2').tobytes()
-    new_lut = parsed['header'] + bytes(parsed['in_table']) + new_clut_bytes + bytes(parsed['out_table'])
-    assert len(new_lut) == tag_size, f"New A2B0 size {len(new_lut)} != original {tag_size}"
-
-    data[tag_offset:tag_offset + tag_size] = new_lut
-
-    old_name = b'GenericDngFile-Neutral\x00'
-    new_name = b'GenericDngFile-Xtalked\x00'
-    data = bytearray(bytes(data).replace(old_name, new_name))
-
-    output_path.write_bytes(data)
-    print(f"Written: {output_path}")
-
-
-def main_bake_icc():
-    ap = argparse.ArgumentParser(description='Bake crosstalk correction into ICC CLUT.')
-    ap.add_argument('--input', type=Path, default=_DEFAULT_ICC_INPUT,
-                    help='Source ICC profile (default: GenericDngFile-Neutral.icm)')
-    ap.add_argument('--output', type=Path, required=True, help='Output ICC profile path')
-    _add_matrix_args(ap)
-    args = ap.parse_args()
-
-    try:
-        M_inv = _resolve_matrix(args)
-    except ValueError as e:
-        ap.error(str(e))
-
-    bake_crosstalk_icc(args.input, args.output, M_inv)
 
 
 if __name__ == '__main__':

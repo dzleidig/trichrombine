@@ -24,7 +24,7 @@ import sys
 import time
 from pathlib import Path
 
-from .scanner import (
+from .lib.scanner import (
     BAYER_INDEX,
     CLIP_THRESHOLD,
     OFF,

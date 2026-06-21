@@ -11,11 +11,13 @@ Usage:
     trichrom-calibrate --watch-dir DIR [options]
 
 Options:
-    --port PORT         Serial port (default: auto-detect)
-    --watch-dir DIR     Watch this directory for new ARW files (required)
-    --capture-wait N    Max seconds to wait for file transfer (default: 5.0)
-    --stabilize N       Seconds to wait after setting color (default: 0.1)
-    --dry-run           Print actions without connecting to hardware
+    --port PORT              Serial port (default: auto-detect)
+    --watch-dir DIR          Watch this directory for new ARW files (required)
+    --capture-wait N         Max seconds to wait for file transfer (default: 5.0)
+    --stabilize N            Seconds to wait after setting color (default: 0.1)
+    --clip-threshold N       Raw value considered clipping (default: 14000)
+    --probe-brightness N     Initial LED brightness for calibration iterations (default: 50)
+    --dry-run                Print actions without connecting to hardware
 """
 
 import argparse
@@ -24,10 +26,9 @@ import sys
 import time
 from pathlib import Path
 
-from .scanner import (
+from .lib.scanner import (
     BAYER_INDEX,
     CLIP_THRESHOLD,
-    OFF,
     PROBE_BRIGHTNESS,
     Scanlight,
     find_scanlight_port,
@@ -75,61 +76,83 @@ def calibrate(scanlight, args):
     current state; only exit when the most recent shot shows all channels
     in acceptable range.
 
+    If a channel maxes out at brightness 255 without reaching the target,
+    prompts the user to adjust camera exposure and retries from scratch.
+
     Returns {ch: brightness}.
     """
-    bv = {'R': PROBE_BRIGHTNESS, 'G': PROBE_BRIGHTNESS, 'B': PROBE_BRIGHTNESS}
-    clipped_at = {'R': set(), 'G': set(), 'B': set()}
-    all_paths = []
-    iteration = 0
-
     while True:
-        iteration += 1
-        print(f"--- Iteration {iteration}  R={bv['R']} G={bv['G']} B={bv['B']} ---")
+        bv = {'R': args.probe_brightness, 'G': args.probe_brightness, 'B': args.probe_brightness}
+        clipped_at = {'R': set(), 'G': set(), 'B': set()}
+        all_paths = []
+        iteration = 0
 
-        path, maxes = shoot_all(scanlight, args, bv)
-        all_paths.append(path)
+        while True:
+            iteration += 1
+            print(f"--- Iteration {iteration}  R={bv['R']} G={bv['G']} B={bv['B']} ---")
 
-        for ch in 'RGB':
-            print(f"  [{ch}] 99th-percentile={maxes[ch]:.1f}")
+            path, maxes = shoot_all(scanlight, args, bv)
+            all_paths.append(path)
 
-        new_bv = {}
-        channel_done = {}
-        for ch in 'RGB':
-            m = maxes[ch]
-            if m > CLIP_THRESHOLD:
-                clipped_at[ch].add(bv[ch])
-                new_bv[ch] = max(1, round(bv[ch] * CLIP_THRESHOLD / m))
-                channel_done[ch] = False
-            elif m >= CLIP_THRESHOLD * TARGET_RATIO or bv[ch] == 255:
-                new_bv[ch] = bv[ch]
-                channel_done[ch] = True
-            else:
-                scaled = min(255, round(bv[ch] * CLIP_THRESHOLD / m))
-                if scaled in clipped_at[ch] or scaled == bv[ch]:
+            for ch in 'RGB':
+                print(f"  [{ch}] 99th-percentile={maxes[ch]:.1f}")
+
+            new_bv = {}
+            channel_done = {}
+            clip = args.clip_threshold
+            for ch in 'RGB':
+                m = maxes[ch]
+                if m > clip:
+                    clipped_at[ch].add(bv[ch])
+                    new_bv[ch] = max(1, round(bv[ch] * clip / m))
+                    channel_done[ch] = False
+                elif m >= clip * TARGET_RATIO or bv[ch] == 255:
                     new_bv[ch] = bv[ch]
                     channel_done[ch] = True
                 else:
-                    new_bv[ch] = scaled
-                    channel_done[ch] = False
+                    scaled = min(255, round(bv[ch] * clip / m))
+                    if scaled in clipped_at[ch] or scaled == bv[ch]:
+                        new_bv[ch] = bv[ch]
+                        channel_done[ch] = True
+                    else:
+                        new_bv[ch] = scaled
+                        channel_done[ch] = False
 
-        print()
-        if all(channel_done.values()):
-            print("Converged — all channels in acceptable range on this shot.\n")
-            break
+            print()
+            if all(channel_done.values()):
+                print("Converged — all channels in acceptable range on this shot.\n")
+                break
 
-        if new_bv == bv:
-            print("No progress — accepting current brightnesses.\n")
-            break
+            if new_bv == bv:
+                print("No progress — accepting current brightnesses.\n")
+                break
 
-        bv = new_bv
+            bv = new_bv
 
-    for ch in 'RGB':
-        if bv[ch] == 255 and maxes[ch] < CLIP_THRESHOLD * TARGET_RATIO:
-            sys.exit(
-                f"\n{ch} channel reached max LED brightness (255) but only achieved "
-                f"{maxes[ch]:.0f} (need ≥{CLIP_THRESHOLD * TARGET_RATIO:.0f}).\n"
-                "Raise camera exposure: increase ISO, open aperture, or increase light intensity."
-            )
+        underexposed = [
+            ch for ch in 'RGB'
+            if bv[ch] == 255 and maxes[ch] < args.clip_threshold * TARGET_RATIO
+        ]
+        if underexposed:
+            for ch in underexposed:
+                print(
+                    f"  [{ch}] reached max LED brightness (255) but only achieved "
+                    f"{maxes[ch]:.0f} (need ≥{args.clip_threshold * TARGET_RATIO:.0f})"
+                )
+            print("\nExposure too low. Raise ISO, open aperture, or slow shutter speed.")
+            print("Adjust camera settings, then press Enter to retry (Ctrl+C to quit)...")
+            try:
+                input()
+            except KeyboardInterrupt:
+                print("\nInterrupted.")
+                sys.exit(0)
+            print()
+            for p in all_paths:
+                if p.exists():
+                    p.unlink()
+            continue
+
+        break
 
     final_path = all_paths[-1]
     deleted = 0
@@ -161,6 +184,10 @@ def main():
                         help='Max seconds to wait for file transfer (default: 5.0)')
     parser.add_argument('--stabilize', type=float, default=0.1, metavar='N',
                         help='Seconds to wait after setting color (default: 0.1)')
+    parser.add_argument('--clip-threshold', type=int, default=CLIP_THRESHOLD, metavar='N',
+                        help=f'Raw value considered clipping (default: {CLIP_THRESHOLD})')
+    parser.add_argument('--probe-brightness', type=int, default=PROBE_BRIGHTNESS, metavar='N',
+                        help=f'Initial LED brightness for calibration iterations (default: {PROBE_BRIGHTNESS})')
     parser.add_argument('--dry-run', action='store_true',
                         help='Print actions without connecting to hardware')
     args = parser.parse_args()

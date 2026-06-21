@@ -19,16 +19,19 @@ dependencies = [
     "tifffile",
     "pyexiv2",
     "pyserial",
-    "scipy",
 ]
 
 [project.scripts]
-trichrom-capture = "trichrom.rgb_capture:main"
 trichrom-calibrate = "trichrom.calibrate_rgb:main"
-trichrom-combine = "trichrom.combine_rgb_scans:main"
+trichrom-measure-crosstalk = "trichrom.measure_crosstalk:main"
 trichrom-correct = "trichrom.correct_crosstalk:main"
+trichrom-capture = "trichrom.legacy.rgb_capture:main"
+trichrom-combine = "trichrom.legacy.combine_rgb_scans:main"
 
 [project.optional-dependencies]
+legacy = [
+    "scipy",     # LCC map smoothing (required for trichrom-combine)
+]
 dev = [
     "pytest>=7.0",
 ]

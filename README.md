@@ -1,38 +1,107 @@
 # trichrombine
 
-RGB film scanning via Scanlight LED controller + Sony A7III + Capture One.
+Single-shot RGB film scanning with Bayer crosstalk correction — trichromatic color quality at single-shot speed.
 
-Includes tools for:
-- **Single-shot RGB capture** with per-channel brightness calibration
-- **Bayer crosstalk correction** to fix desaturation in single-shot captures
-- **3-shot trichromatic capture** (legacy)
-- **DNG combining** and metadata management
+## Overview
 
-## Installation
+Color negative film has a wide color gamut and a distinctive orange mask that makes accurate scanning challenging. The key insight, described in depth by [Alexi Maschas](https://medium.com/@alexi.maschas/color-negative-film-color-spaces-786e1d9903a4), is that scanning with spectrally narrow RGB LEDs allows you to capture each channel independently and work in a well-defined color space — rather than relying on the camera's native white balance and the scanner light's broad spectrum.
 
-```bash
-pip install -e .
-```
+The [Scanlight](https://jackw01.github.io/scanlight/) is a Raspberry Pi Pico-based LED driver designed for exactly this purpose: independently controllable R, G, and B LEDs with a narrow enough spectrum to give clean channel separation.
 
-This installs four CLI commands: `trichrom-capture`, `trichrom-calibrate`, `trichrom-combine`, `trichrom-correct`.
+### Single-shot vs. trichromatic scanning
 
-## The crosstalk problem
+The cleanest approach is **trichromatic** (3-shot) scanning: fire only the red LED and capture, then green, then blue, then combine the three frames. Each frame captures one pure channel with no contamination from the others.
 
-Single-shot captures (all three LEDs on simultaneously) look noticeably desaturated compared to trichromatic captures of the same scene. The cause is **Bayer sensor crosstalk**: even narrowband LEDs have some spectral overlap with adjacent Bayer filter channels. Red light, for example, still registers a measurable signal in the green and blue photosites. That cross-contamination pulls all three channels toward each other, which manifests as reduced saturation.
+The drawback is speed and complexity: three exposures per frame, plus alignment and combining in post. For large scanning sessions this is cumbersome.
+
+**Single-shot** scanning fires all three LEDs simultaneously. The camera captures all channels in one exposure — much faster. 
+
+
+### Crosstalk and single-shot scanning
+
+The problem with single-shot scanning is that even narrowband LEDs have some spectral overlap. Red light still registers a small signal in the green and blue photosites. This **Bayer crosstalk** mixes the channels — pulling all three toward each other — and manifests as reduced saturation.
+
+
+## Correcting crosstalk
 
 The fix is to measure the exact crosstalk for this camera + light combination, invert the resulting 3×3 matrix, and multiply the raw pixel values by M⁻¹ before writing the DNG. This undoes the mixing and restores the color separation the sensor should have captured.
 
 Crosstalk is measured by shooting three calibration exposures — one per LED channel, with the other two off — and reading the raw Bayer-level response in all three channel positions for each exposure. These nine values form the crosstalk matrix M; its inverse is the correction.
 
-## Quick Start
 
-### 1. Calibrate LED brightness (one-time per session)
+
+## Results
+
+The effect of crosstalk correction is visible both in the raw negative and the final converted image. The corrected scan has better channel separation, which translates to more saturated and accurate colors after inversion.
+
+**Raw negative — before vs. after correction:**
+
+| Before | After |
+|--------|-------|
+| ![Original scan](test_images/original.jpg) | ![Corrected scan](test_images/crosstalk_corrected.jpg) |
+
+**Converted to positive — before vs. after correction:**
+
+| Before | After |
+|--------|-------|
+| ![Original converted](test_images/original_converted.jpg) | ![Corrected converted](test_images/crosstalk_corrected_converted.jpg) |
+
+The greens in the field and foliage are noticeably more saturated after correction. Crosstalk was pulling the green channel toward red and blue, desaturating everything.
+
+**Raw channel histograms:**
+
+| Before | After |
+|--------|-------|
+| ![Original histogram](test_images/original_hist.png) | ![Corrected histogram](test_images/crosstalk_corrected_hist.png) |
+
+The corrected histogram shows the green channel shifted significantly (less red/blue contamination mixed in), while red and blue tighten up as well.
+
+
+## Installation
 
 ```bash
-trichrom-calibrate --watch-dir /path/to/captures --stabilize 0.5 --capture-wait 10
+pipx install git+https://github.com/dzleidig/trichrombine.git
 ```
 
-Finds the maximum safe brightness for each LED that won't clip the film rebate. Output:
+This installs three CLI commands: `trichrom-calibrate`, `trichrom-measure-crosstalk`, and `trichrom-correct`.
+
+
+
+## Workflow
+
+Single-shot RGB captures all three channels simultaneously, providing speed and consistency. The workflow has three phases: compute a crosstalk matrix (one-time), calibrate per-session, and capture+correct per-frame.
+
+#### Step 1: Measure crosstalk matrix (one-time)
+
+Shoot three ARW frames with one LED at a time (red-only, green-only, blue-only) against a uniform backlit target. Expose each frame ETTR (as bright as possible without clipping) to maximize signal-to-noise in the off-diagonal channels — the crosstalk signal is weak and needs a clean read. Then measure and save the crosstalk matrix:
+
+```bash
+trichrom-measure-crosstalk \
+    --red calibrations/RED.ARW \
+    --green calibrations/GREEN.ARW \
+    --blue calibrations/BLUE.ARW \
+    --output calibrations/crosstalk.csv
+```
+
+The calibration frames look like this — one LED at a time:
+
+| Red only | Green only | Blue only |
+|----------|------------|-----------|
+| ![Red calibration](test_images/crosstalk/channel_calibration/red.jpg) | ![Green calibration](test_images/crosstalk/channel_calibration/green.jpg) | ![Blue calibration](test_images/crosstalk/channel_calibration/blue.jpg) |
+
+The tool prints the measured matrix M and its inverse M⁻¹. Pass the saved CSV to `trichrom-correct` via `--matrix calibrations/crosstalk.csv`. A pre-measured matrix for the Sony A7III + Scanlight is included at `test_images/crosstalk.csv` — if you have the same hardware, you can skip this step and use that directly.
+
+The matrix is a property of the camera + LED hardware, not the film or scene. It stays consistent across different rolls, exposures, and shooting conditions. The only thing that can cause it to vary slightly (~2–3%) is LED temperature, since LEDs shift their spectral output slightly with temperature. In practice, one measurement is good indefinitely for a given camera and Scanlight unit.
+
+#### Step 2: Calibrate LED brightness (per scanning session)
+
+For each new camera setup or lighting condition, run `trichrom-calibrate` to find the optimal per-channel LED brightness. It connects to the Scanlight over USB and triggers captures via Capture One (tethered to the camera), iteratively adjusting R, G, and B independently until each channel is as bright as possible without clipping — ETTR per channel.
+
+```bash
+trichrom-calibrate --watch-dir /path/to/captures
+```
+
+Output shows the recommended brightness levels to use for scanning:
 
 ```
 === Result ===
@@ -41,69 +110,18 @@ Finds the maximum safe brightness for each LED that won't clip the film rebate. 
   --brightness-b 210
 ```
 
-### 2. Capture frames
+If any channel can't reach the target without the LED maxing out, the tool will prompt you to adjust camera exposure (shutter speed, ISO, or aperture) and retry automatically.
+
+#### Step 3: Capture and correct (per scanning session)
+
+Set the calibrated brightness levels on your Scanlight and start `trichrom-correct` in watch mode. It will automatically correct each ARW as it arrives — just scan normally and the corrected DNGs appear in the output folder:
+
 
 ```bash
-trichrom-capture \
-  --watch-dir /path/to/captures \
-  --brightness-r 200 --brightness-g 180 --brightness-b 210 \
-  --loop
+trichrom-correct --watch /path/to/captures --output /path/to/dngs --matrix calibrations/crosstalk.csv
 ```
 
-All three LEDs fire simultaneously. Press Enter for each frame; Ctrl+C to stop.
-
-### 3. Apply crosstalk correction
-
-Single file:
-```bash
-trichrom-correct --input SHOT.ARW --output corrected.DNG
-```
-
-Watch a folder and process automatically as new ARWs arrive:
-```bash
-trichrom-correct --watch /path/to/captures --output /path/to/dngs
-```
-
-Processed ARWs are moved to a `processed/` subfolder. If you want to re-measure the crosstalk matrix from your own calibration shots instead of using the built-in values:
-
-```bash
-trichrom-correct --input SHOT.ARW --output corrected.DNG \
-    --red RED.ARW --green GREEN.ARW --blue BLUE.ARW
-```
-
-### 4. Combine triplets (legacy 3-shot mode)
-
-```bash
-trichrom-combine -i /path/to/arw_folder -o /path/to/output
-```
-
-For historical 3-shot RGB captures (R, G, B in sequence), extracts each channel's Bayer photosites and recombines into a single DNG.
-
-## Repository Structure
-
-```
-trichrom/
-├── src/trichrom/
-│   ├── scanner.py              # Scanlight hardware abstraction
-│   ├── rgb_capture.py          # Trichromatic capture script
-│   ├── calibrate_rgb.py        # LED brightness calibration
-│   ├── combine_rgb_scans.py    # DNG combining (legacy 3-shot)
-│   └── correct_crosstalk.py    # Single-shot crosstalk correction
-├── test_images/                # Calibration ARWs and histograms
-├── pyproject.toml
-└── README.md
-```
-
-## Dependencies
-
-- **rawpy** — read Sony ARW raw files
-- **numpy** — array operations
-- **tifffile** — write DNG output
-- **pyexiv2** — manage EXIF/IPTC metadata
-- **pyserial** — serial communication with Scanlight
-- **scipy** — interpolation for ICC CLUT baking
-
-All installed automatically via `pip install -e .`
+Processed ARWs are moved to a `processed/` subfolder. Corrected DNGs are written to the output directory (or the same directory if `--output` is not specified).
 
 ## Hardware
 

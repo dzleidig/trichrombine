@@ -24,7 +24,7 @@ CAPTURE_ONE_APP = "Capture One"
 BAYER_INDEX = {'R': 0, 'G': 1, 'B': 2}
 OFF = (0, 0, 0, 0, 0)
 CLIP_THRESHOLD = 14000
-PROBE_BRIGHTNESS = 20
+PROBE_BRIGHTNESS = 50
 
 
 def _build_set_color_packet(r, g, b, w, ir, brightness):
