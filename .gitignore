@@ -1,13 +1,55 @@
-# Input/output data — large raw files, not source
-input/
-output/
-
-# macOS
-.DS_Store
-
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
-.venv/
+.installed.cfg
+*.egg
+
+# pytest
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Virtual environments
 venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.tool-versions
+
+# Project-specific
+input/
+*.ARW
+*.DNG
+
+CaptureOne/
