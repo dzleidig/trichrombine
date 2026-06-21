@@ -2,43 +2,13 @@
 
 Single-shot RGB film scanning with Bayer crosstalk correction — trichromatic color quality at single-shot speed.
 
-## Overview
+- [Demo](#demo)
+- [Background](#background)
+- [Installation](#installation)
+- [Workflow](#workflow)
+- [Hardware](#hardware)
 
-Color negative film has a wide color gamut and a distinctive orange mask that makes accurate scanning challenging. The key insight, described in depth by [Alexi Maschas](https://medium.com/@alexi.maschas/color-negative-film-color-spaces-786e1d9903a4), is that scanning with spectrally narrow RGB LEDs allows you to capture each channel independently and work in a well-defined color space — rather than relying on the camera's native white balance and the scanner light's broad spectrum.
-
-The [Scanlight](https://jackw01.github.io/scanlight/) is a Raspberry Pi Pico-based LED driver designed for exactly this purpose: independently controllable R, G, and B LEDs with a narrow enough spectrum to give clean channel separation.
-
-### Single-shot vs. trichromatic scanning
-
-The cleanest approach is **trichromatic** (3-shot) scanning: fire only the red LED and capture, then green, then blue, then combine the three frames. Each frame captures one pure channel with no contamination from the others.
-
-The drawback is speed and complexity: three exposures per frame, plus alignment and combining in post. For large scanning sessions this is cumbersome.
-
-**Single-shot** scanning fires all three LEDs simultaneously. The camera captures all channels in one exposure — much faster. 
-
-
-### Crosstalk and single-shot scanning
-
-The problem with single-shot scanning is that even narrowband LEDs have some spectral overlap. Red light still registers a small signal in the green and blue photosites. This **Bayer crosstalk** mixes the channels — pulling all three toward each other — and manifests as reduced saturation.
-
-
-## Correcting crosstalk
-
-The fix is to measure the exact crosstalk for this camera + light combination, invert the resulting 3×3 matrix, and multiply the raw pixel values by M⁻¹ before writing the DNG. This undoes the mixing and restores the color separation the sensor should have captured.
-
-Crosstalk is measured by shooting three calibration exposures — one per LED channel, with the other two off — and reading the raw Bayer-level response in all three channel positions for each exposure. These nine values form the crosstalk matrix M; its inverse is the correction.
-
-
-
-## Results
-
-The effect of crosstalk correction is visible both in the raw negative and the final converted image. The corrected scan has better channel separation, which translates to more saturated and accurate colors after inversion.
-
-**Raw negative — before vs. after correction:**
-
-| Before | After |
-|--------|-------|
-| ![Original scan](test_images/original.jpg) | ![Corrected scan](test_images/crosstalk_corrected.jpg) |
+## Demo
 
 **Converted to positive — before vs. after correction:**
 
@@ -48,6 +18,12 @@ The effect of crosstalk correction is visible both in the raw negative and the f
 
 The greens in the field and foliage are noticeably more saturated after correction. Crosstalk was pulling the green channel toward red and blue, desaturating everything.
 
+**Raw negative — before vs. after correction:**
+
+| Before | After |
+|--------|-------|
+| ![Original scan](test_images/original.jpg) | ![Corrected scan](test_images/crosstalk_corrected.jpg) |
+
 **Raw channel histograms:**
 
 | Before | After |
@@ -55,6 +31,24 @@ The greens in the field and foliage are noticeably more saturated after correcti
 | ![Original histogram](test_images/original_hist.png) | ![Corrected histogram](test_images/crosstalk_corrected_hist.png) |
 
 The corrected histogram shows the green channel shifted significantly (less red/blue contamination mixed in), while red and blue tighten up as well.
+
+## Background
+
+For information on the benefits of narrowband scanning over broad spectrum:
+- https://jackw01.github.io/scanlight/
+- https://medium.com/@alexi.maschas/color-negative-film-color-spaces-786e1d9903a4
+
+### Single-shot vs. trichromatic scanning
+
+The cleanest approach is **trichromatic** (3-shot) scanning: fire only the red LED and capture, then green, then blue, then combine the three frames. Each frame captures one pure channel with no contamination from the others. The drawback is speed and complexity: three exposures per frame, plus alignment and combining in post. For large scanning sessions this is cumbersome.
+
+**Single-shot** scanning fires all three LEDs simultaneously — much faster. The problem is that even narrowband LEDs have some spectral overlap. Red light still registers a small signal in the green and blue photosites. This **Bayer crosstalk** mixes the channels — pulling all three toward each other — and manifests as reduced saturation.
+
+### How crosstalk correction works
+
+The fix: measure the exact crosstalk for this camera + light combination, invert the resulting 3×3 matrix, and multiply the raw pixel values by M⁻¹ before writing the DNG. This undoes the mixing and restores the color separation the sensor should have captured.
+
+Crosstalk is measured by shooting three calibration exposures — one per LED channel, with the other two off — and reading the raw Bayer-level response in all three channel positions for each exposure. These nine values form the crosstalk matrix M; its inverse is the correction.
 
 
 ## Installation
@@ -66,10 +60,7 @@ pipx install git+https://github.com/dzleidig/trichrombine.git
 This installs three CLI commands: `trichrom-calibrate`, `trichrom-measure-crosstalk`, and `trichrom-correct`.
 
 
-
 ## Workflow
-
-Single-shot RGB captures all three channels simultaneously, providing speed and consistency. The workflow has three phases: compute a crosstalk matrix (one-time), calibrate per-session, and capture+correct per-frame.
 
 #### Step 1: Measure crosstalk matrix (one-time)
 
