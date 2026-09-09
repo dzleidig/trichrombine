@@ -29,8 +29,11 @@ One command, launched once per roll:
 
 ```bash
 trichrom-scan --session-dir /path/to/session --watch-dir /path/to/captures \
-    --output-dir /path/to/tiffs --film-stock "Portra 400" --roll-id roll01
+    --film-stock "Portra 400" --roll-id roll01
 ```
+
+`--output-dir` defaults to `--watch-dir` (merged TIFFs land next to the ARWs); pass
+it explicitly to write merged TIFFs somewhere else.
 
 A brand-new `--session-dir` (or `--recalibrate`) runs calibration first: ~5 minutes
 of LED warm-up, per-channel flats (holder off, bare light), then a leader-based
@@ -38,7 +41,7 @@ two-pass channel balance + shutter-speed exposure targeting. Resuming an
 already-calibrated session skips straight to the capture loop:
 
 ```bash
-trichrom-scan --resume --watch-dir /path/to/captures --output-dir /path/to/tiffs
+trichrom-scan --resume --watch-dir /path/to/captures
 ```
 
 `--resume` (or an explicit `--session-dir` pointing at an existing session) reuses

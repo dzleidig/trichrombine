@@ -49,8 +49,11 @@ Launch once per roll:
 
 ```bash
 trichrom-scan --session-dir /path/to/session --watch-dir /path/to/captures \
-    --output-dir /path/to/tiffs --film-stock "Portra 400" --roll-id roll01
+    --film-stock "Portra 400" --roll-id roll01
 ```
+
+Merged TIFFs land in `--watch-dir` by default, alongside the ARWs; pass
+`--output-dir` to write them somewhere else instead.
 
 ### Calibration (automatic on a new session)
 
@@ -88,7 +91,7 @@ problem shows up on frame one, not after a whole roll.
 To resume a previous session instead of starting a new one:
 
 ```bash
-trichrom-scan --resume --watch-dir /path/to/captures --output-dir /path/to/tiffs
+trichrom-scan --resume --watch-dir /path/to/captures
 ```
 
 `--resume` reuses the most recently calibrated session (or pass `--session-dir`

@@ -20,9 +20,12 @@ per session in Capture One and never touched here.
 No exposure bracketing: calibration exists precisely to remove that uncertainty.
 
 Usage:
-    trichrom-scan --session-dir /path/to/session --watch-dir DIR --output-dir DIR \
+    trichrom-scan --session-dir /path/to/session --watch-dir DIR \
         --film-stock "Portra 400" --roll-id roll01
-    trichrom-scan --resume --watch-dir DIR --output-dir DIR
+    trichrom-scan --resume --watch-dir DIR
+
+--output-dir defaults to --watch-dir (merged TIFFs land next to the ARWs); pass
+it explicitly to write merged TIFFs somewhere else.
 """
 
 import argparse
@@ -320,7 +323,8 @@ def main():
     parser.add_argument('--session-dir', metavar='DIR', help='Session folder (default: --resume the last one)')
     parser.add_argument('--resume', action='store_true', help='Resume the most recently used session')
     parser.add_argument('--watch-dir', required=True, metavar='DIR', help='Capture One session capture folder')
-    parser.add_argument('--output-dir', required=True, metavar='DIR', help='Where merged TIFFs are written')
+    parser.add_argument('--output-dir', metavar='DIR',
+                        help='Where merged TIFFs are written (default: --watch-dir)')
     parser.add_argument('--film-stock', default='', help='Film stock name, recorded in session state')
     parser.add_argument('--roll-id', default='', help='Roll identifier, recorded in session state')
     parser.add_argument('--date', default=None, help='Session date (default: today)')
@@ -352,6 +356,9 @@ def main():
 
     if not args.session_dir and not args.resume:
         parser.error("one of --session-dir or --resume is required")
+
+    if not args.output_dir:
+        args.output_dir = args.watch_dir
 
     is_new_session = args.session_dir and not (Path(args.session_dir) / 'session.json').exists()
     if is_new_session:
