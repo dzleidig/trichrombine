@@ -3,7 +3,7 @@
 import numpy as np
 from scipy.ndimage import uniform_filter
 
-from ..legacy.combine_rgb_scans import extract_bayer_channel
+from .rawio import extract_bayer_channel
 
 
 def build_channel_flat(raw_images, pattern, channel_indices, black_levels, smooth_size=201):
