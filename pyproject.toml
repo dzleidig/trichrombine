@@ -19,6 +19,8 @@ dependencies = [
     "tifffile",
     "pyexiv2",
     "pyserial",
+    "scipy",     # leader-density masking, flat-field smoothing (tri_* tools)
+    "gphoto2",   # tethered shutter trigger + shutter-speed control (tri_* tools)
 ]
 
 [project.scripts]
@@ -27,11 +29,10 @@ trichrom-measure-crosstalk = "trichrom.measure_crosstalk:main"
 trichrom-correct = "trichrom.correct_crosstalk:main"
 trichrom-capture = "trichrom.legacy.rgb_capture:main"
 trichrom-combine = "trichrom.legacy.combine_rgb_scans:main"
+trichrom-tri-calibrate = "trichrom.tri_calibrate:main"
+trichrom-tri-capture = "trichrom.tri_capture:main"
 
 [project.optional-dependencies]
-legacy = [
-    "scipy",     # LCC map smoothing (required for trichrom-combine)
-]
 dev = [
     "pytest>=7.0",
 ]
