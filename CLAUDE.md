@@ -63,9 +63,12 @@ merged TIFF.
 ## Tests
 
 ```bash
-pip install -e ".[dev]"
-pytest
+python -m pip install -e ".[dev]"
+python -m pytest
 ```
+
+(`python -m` rather than the bare `pytest` script guarantees the tests run under the
+same interpreter the dependencies were installed into.)
 
 Tests cover the pure logic that fails *silently* — merge math, the ICC profile, leader
 measurement, shutter selection, session state. No hardware, no ARWs, sub-second. The
