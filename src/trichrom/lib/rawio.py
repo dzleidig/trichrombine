@@ -12,6 +12,8 @@ def read_raw(path):
             'sizes': raw.sizes,
             'black_level_per_channel': list(raw.black_level_per_channel),
             'white_level': raw.white_level,
+            # Recorded as provenance only — never applied. See merge_tri.
+            'camera_whitebalance': [float(v) for v in raw.camera_whitebalance],
         }
 
 

@@ -60,7 +60,20 @@ TIFF, and per-channel peaks print as a drift check. A JSON sidecar with calibrat
 numbers, shutter speed, raw peaks, and source filenames is written next to every
 merged TIFF.
 
-There are no tests or linting configured.
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+Tests cover the pure logic that fails *silently* — merge math, the ICC profile, leader
+measurement, shutter selection, session state. No hardware, no ARWs, sub-second. The
+camera backends and capture loop are deliberately untested: without a camera attached
+there's nothing meaningful to assert. No linting is configured.
+
+When adding tests, check they actually catch a regression — break the thing on purpose
+and confirm the relevant test fails.
 
 ## Project structure
 
@@ -161,7 +174,12 @@ dir for `--resume`; losing it costs convenience. Per-frame status is recorded so
 mid-roll merge failure identifies exactly which frames need redoing.
 
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
-pyserial), ARW file watching, and Bayer channel sampling utilities. The Bayer
-channel index mapping is 0=R, 1=G, 2=B, 3=G2 (second green in RGGB); black/white
-levels and active sensor area margins are read directly from source files — no
-camera-specific hardcoding.
+pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,
+3=G2 (second green in RGGB); black/white levels and active sensor area margins are
+read directly from source files — no camera-specific hardcoding.
+
+Note that `wait_for_new_file()` picks arbitrarily if more than one ARW appears
+between polls, so `capture_frame()` settles each file before firing the next
+channel. That per-channel settle isn't about read integrity (only the merge reads);
+it's what keeps one trigger mapped to one file, and therefore what keeps
+filename→channel attribution correct.

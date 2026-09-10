@@ -68,15 +68,11 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta):
     stacked = np.clip(np.stack([planes['R'], planes['G'], planes['B']], axis=-1), 0, 1)
     image = (stacked * 65535 + 0.5).astype(np.uint16)
 
-    camera_wb = {
-        ch: [float(v) for v in rawpy_wb]
-        for ch, rawpy_wb in (('R', _camera_wb(red_path)), ('G', _camera_wb(green_path)),
-                              ('B', _camera_wb(blue_path)))
-    }
-
     tiff_meta = dict(meta)
     tiff_meta['peaks'] = peaks
-    tiff_meta['camera_as_shot_wb_recorded_not_applied'] = camera_wb
+    tiff_meta['camera_as_shot_wb_recorded_not_applied'] = {
+        ch: raws[ch]['camera_whitebalance'] for ch in 'RGB'
+    }
 
     tifffile.imwrite(
         str(output_path),
@@ -100,12 +96,6 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta):
         }, f, indent=2)
 
     return peaks
-
-
-def _camera_wb(path):
-    import rawpy
-    with rawpy.imread(str(path)) as raw:
-        return raw.camera_whitebalance
 
 
 _PRESERVED_EXIF_KEYS = [

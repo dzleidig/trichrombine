@@ -48,7 +48,8 @@ from .lib.scanner import CHANNEL_BAYER_INDICES, OFF, Scanlight, find_scanlight_p
 from .lib.shutter import nearest_shutter_choice, shutter_str_to_seconds
 
 CHANNELS = 'RGB'
-CHANNEL_COLOR = {'R': (255, 0, 0), 'G': (0, 255, 0), 'B': (0, 0, 255)}
+# Which of the Scanlight's r/g/b slots each channel drives; the others stay at 0.
+CHANNEL_SLOT = {'R': 0, 'G': 1, 'B': 2}
 TARGET_LOW, TARGET_HIGH = 0.80, 0.90
 SETTLE_SECONDS = 1.0
 CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
@@ -59,8 +60,9 @@ CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
 # --------------------------------------------------------------------------
 
 def _shoot(scanlight, camera, args, ch, level):
-    r, g, b = CHANNEL_COLOR[ch]
-    scanlight.set_color(r * level // 255, g * level // 255, b * level // 255, 0, 0, 255)
+    rgb = [0, 0, 0]
+    rgb[CHANNEL_SLOT[ch]] = level
+    scanlight.set_color(*rgb, 0, 0, 255)
     time.sleep(args.stabilize)
 
     try:
@@ -338,28 +340,33 @@ def main():
     parser.add_argument('--camera-backend', choices=sorted(CAMERA_BACKENDS), default='captureone',
                         help='How the shutter is fired (default: captureone)')
     parser.add_argument('--recalibrate', action='store_true', help='Force recalibration even if already calibrated')
-    parser.add_argument('--start-power', type=int, default=200, metavar='N',
-                        help='Starting LED power 0-255 for channel balance (default: 200)')
-    parser.add_argument('--flat-brightness', type=int, default=180, metavar='N',
-                        help='LED brightness 0-255 for flat-field shots (default: 180)')
-    parser.add_argument('--flat-shots', type=int, default=6, metavar='N',
-                        help='Exposures averaged per channel for flat fields (default: 6)')
-    parser.add_argument('--skip-flats', action='store_true', help='Reuse existing flats from session dir')
-    parser.add_argument('--warmup-seconds', type=float, default=300, metavar='N',
-                        help='LED warm-up wait before calibrating (default: 300)')
-    parser.add_argument('--skip-warmup', action='store_true', help='Skip the LED warm-up wait')
-    parser.add_argument('--max-exposure-iterations', type=int, default=4, metavar='N',
-                        help='Cap on shutter-speed refinement iterations (default: 4)')
-    parser.add_argument('--stabilize', type=float, default=0.15, metavar='N',
-                        help='LED settle + stand vibration delay before triggering (default: 0.15)')
-    parser.add_argument('--capture-wait', type=float, default=8.0, metavar='N',
-                        help='Max seconds to wait for the ARW to land in --watch-dir (default: 8.0)')
-    parser.add_argument('--shutter-timeout-ms', type=int, default=8000, metavar='N',
-                        help='Max ms to wait for capture confirmation, gphoto2 backend only (default: 8000)')
-    parser.add_argument('--preview-brightness', type=int, default=32, metavar='N',
-                        help='White-equivalent (R=G=B) LED level while advancing film (default: 32)')
     parser.add_argument('--dry-run', action='store_true', help='Print actions without touching hardware')
-    parser.add_argument('--dry-run-shutter', default='1/60', help='Fake shutter value to record in --dry-run')
+
+    calib = parser.add_argument_group('calibration tuning', 'Defaults are usually fine.')
+    calib.add_argument('--start-power', type=int, default=200, metavar='N',
+                       help='Starting LED power 0-255 for channel balance (default: 200)')
+    calib.add_argument('--flat-brightness', type=int, default=180, metavar='N',
+                       help='LED brightness 0-255 for flat-field shots (default: 180)')
+    calib.add_argument('--flat-shots', type=int, default=6, metavar='N',
+                       help='Exposures averaged per channel for flat fields (default: 6)')
+    calib.add_argument('--skip-flats', action='store_true', help='Reuse existing flats from session dir')
+    calib.add_argument('--warmup-seconds', type=float, default=300, metavar='N',
+                       help='LED warm-up wait before calibrating (default: 300)')
+    calib.add_argument('--skip-warmup', action='store_true', help='Skip the LED warm-up wait')
+    calib.add_argument('--max-exposure-iterations', type=int, default=4, metavar='N',
+                       help='Cap on shutter-speed refinement iterations (default: 4)')
+
+    timing = parser.add_argument_group('capture timing', 'Defaults are usually fine.')
+    timing.add_argument('--stabilize', type=float, default=0.15, metavar='N',
+                        help='LED settle + stand vibration delay before triggering (default: 0.15)')
+    timing.add_argument('--capture-wait', type=float, default=8.0, metavar='N',
+                        help='Max seconds to wait for the ARW to land in --watch-dir (default: 8.0)')
+    timing.add_argument('--shutter-timeout-ms', type=int, default=8000, metavar='N',
+                        help='Max ms to wait for capture confirmation, gphoto2 backend only (default: 8000)')
+    timing.add_argument('--preview-brightness', type=int, default=32, metavar='N',
+                        help='White-equivalent (R=G=B) LED level while advancing film (default: 32)')
+
+    parser.add_argument('--dry-run-shutter', default='1/60', help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if not args.session_dir and not args.resume:
