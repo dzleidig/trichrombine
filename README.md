@@ -27,13 +27,18 @@ off. The cost is speed: three exposures per frame instead of one.
 - Sony A7R V, Sigma 105mm f/2.8 DG DN Macro (manual focus, f/8)
 - JackW Big ScanLight (narrowband RGB LED, RP2040) over USB serial
 - Negative Supply 35mm MK2 holder on a Kaiser RS1 copy stand
-- Capture One (live view only) + `gphoto2` for tethered shutter triggering
+- Capture One for tethering, live view and shutter triggering (macOS, AppleScript)
 
-Capture One stays tethered for live view and focus magnification only — focus is
-set once per session (the lens is focus-by-wire) and never touched mid-roll. The
-camera shutter is triggered directly via `gphoto2`, since the ScanLight's own
-shutter trigger isn't usable on Sony bodies; Capture One imports whatever lands
-regardless of what triggered it.
+Capture One owns the camera end to end: it holds the tether for live view and focus
+magnification (focus is set once per session — the lens is focus-by-wire — and never
+touched mid-roll), writes the ARWs, and fires the shutter on our behalf via
+AppleScript. Sony's PC Remote connection allows one controlling host at a time, so
+triggering *through* Capture One rather than alongside it is what keeps live view
+available; the ScanLight's own shutter trigger isn't usable on Sony bodies either.
+
+`--camera-backend gphoto2` drives the camera directly instead, as a fallback. It
+needs the optional extra (`pip install "trichrom[gphoto]"`), can't share the camera
+with a Capture One tether, and gphoto2's Sony support is reverse-engineered per body.
 
 ## Installation
 
@@ -83,10 +88,9 @@ The result — channel levels, shutter speed, flat-field paths — is written to
 
 Once calibrated (or when resuming a session that already is), the tool drops into
 the capture loop. Per frame: advance the film, check framing in Capture One's live
-view, press Enter (terminal or footswitch). The three exposures fire in sequence
-via `gphoto2` (trigger + wait-for-event, never a fixed sleep), merge into a linear
-16-bit TIFF, and the per-channel peaks print as a drift check — a light-balance
-problem shows up on frame one, not after a whole roll.
+view, press Enter (terminal or footswitch). The three exposures fire in sequence,
+merge into a linear 16-bit TIFF, and the per-channel peaks print as a drift check —
+a light-balance problem shows up on frame one, not after a whole roll.
 
 To resume a previous session instead of starting a new one:
 

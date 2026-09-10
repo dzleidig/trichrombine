@@ -9,9 +9,13 @@ an already-calibrated session skips straight to capturing, unless the saved
 calibration looks stale, in which case you're asked whether to redo it.
 
 Per frame: advance the film, check framing in Capture One's live view, press
-Enter (terminal or footswitch). All three exposures fire in sequence via
-gphoto2 (trigger + wait-for-event, never a fixed sleep), merge into a linear
-16-bit TIFF, and print per-channel peaks as a drift check.
+Enter (terminal or footswitch). All three exposures fire in sequence, merge into
+a linear 16-bit TIFF, and print per-channel peaks as a drift check.
+
+The shutter is fired through Capture One by default, which keeps C1 the sole
+owner of the camera — Sony's PC Remote allows one controlling host at a time, so
+driving the camera directly would cost the live view that focusing depends on.
+--camera-backend gphoto2 drives the camera directly instead.
 
 No autofocus, ever — AF on a flat low-contrast negative is unreliable, and
 firing between exposures would shift focus across channels. Focus is set once
@@ -35,17 +39,19 @@ from pathlib import Path
 
 import numpy as np
 
-from .lib import gphoto, session_state
+from .lib import captureone, gphoto, session_state
 from .lib.flatfield import build_channel_flat
 from .lib.leader import measure_leader_level
 from .lib.merge_tri import merge_triplet
 from .lib.rawio import crop_half_res, extract_led_channel_plane, read_raw
 from .lib.scanner import CHANNEL_BAYER_INDICES, OFF, Scanlight, find_scanlight_port, wait_for_new_file
+from .lib.shutter import nearest_shutter_choice, shutter_str_to_seconds
 
 CHANNELS = 'RGB'
 CHANNEL_COLOR = {'R': (255, 0, 0), 'G': (0, 255, 0), 'B': (0, 0, 255)}
 TARGET_LOW, TARGET_HIGH = 0.80, 0.90
 SETTLE_SECONDS = 1.0
+CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
 
 
 # --------------------------------------------------------------------------
@@ -62,7 +68,7 @@ def _shoot(scanlight, camera, args, ch, level):
     except FileNotFoundError:
         before = set()
 
-    gphoto.trigger_and_wait(camera, timeout_ms=args.shutter_timeout_ms, dry_run=args.dry_run)
+    args.cam.trigger_and_wait(camera, timeout_ms=args.shutter_timeout_ms, dry_run=args.dry_run)
 
     if args.dry_run:
         return None
@@ -184,17 +190,17 @@ def adjust_exposure(scanlight, camera, args, powers, flats):
 
         if TARGET_LOW * usable_range <= reference <= TARGET_HIGH * usable_range:
             print(f"  Converged after {attempt} shutter iteration(s).\n")
-            return gphoto.get_shutter_speed(camera), peaks
+            return args.cam.get_shutter_speed(camera), peaks
 
-        current = gphoto.shutter_str_to_seconds(gphoto.get_shutter_speed(camera))
-        choices = gphoto.get_shutter_choices(camera)
-        new_shutter = gphoto.nearest_shutter_choice(choices, current * ratio)
+        current = shutter_str_to_seconds(args.cam.get_shutter_speed(camera))
+        choices = args.cam.get_shutter_choices(camera)
+        new_shutter = nearest_shutter_choice(choices, current * ratio)
         print(f"  Adjusting shutter -> {new_shutter}\n")
-        gphoto.set_shutter_speed(camera, new_shutter, dry_run=args.dry_run)
+        args.cam.set_shutter_speed(camera, new_shutter, dry_run=args.dry_run)
 
     print(f"  Did not fully converge after {args.max_exposure_iterations} iterations — "
           f"accepting current shutter speed (discrete steps are coarse).\n")
-    return gphoto.get_shutter_speed(camera), peaks
+    return args.cam.get_shutter_speed(camera), peaks
 
 
 def run_calibration(scanlight, camera, args, state, session_dir):
@@ -329,6 +335,8 @@ def main():
     parser.add_argument('--roll-id', default='', help='Roll identifier, recorded in session state')
     parser.add_argument('--date', default=None, help='Session date (default: today)')
     parser.add_argument('--port', help='Scanlight serial port (default: auto-detect)')
+    parser.add_argument('--camera-backend', choices=sorted(CAMERA_BACKENDS), default='captureone',
+                        help='How the shutter is fired (default: captureone)')
     parser.add_argument('--recalibrate', action='store_true', help='Force recalibration even if already calibrated')
     parser.add_argument('--start-power', type=int, default=200, metavar='N',
                         help='Starting LED power 0-255 for channel balance (default: 200)')
@@ -347,7 +355,7 @@ def main():
     parser.add_argument('--capture-wait', type=float, default=8.0, metavar='N',
                         help='Max seconds to wait for the ARW to land in --watch-dir (default: 8.0)')
     parser.add_argument('--shutter-timeout-ms', type=int, default=8000, metavar='N',
-                        help='Max ms to wait for gphoto2 capture confirmation (default: 8000)')
+                        help='Max ms to wait for capture confirmation, gphoto2 backend only (default: 8000)')
     parser.add_argument('--preview-brightness', type=int, default=32, metavar='N',
                         help='White-equivalent (R=G=B) LED level while advancing film (default: 32)')
     parser.add_argument('--dry-run', action='store_true', help='Print actions without touching hardware')
@@ -359,6 +367,8 @@ def main():
 
     if not args.output_dir:
         args.output_dir = args.watch_dir
+
+    args.cam = CAMERA_BACKENDS[args.camera_backend]
 
     is_new_session = args.session_dir and not (Path(args.session_dir) / 'session.json').exists()
     if is_new_session:
@@ -393,8 +403,8 @@ def main():
         port = args.port or find_scanlight_port()
         print(f"Connecting to Scanlight on {port}...")
         scanlight = Scanlight(port, dry_run=False)
-        print("Connecting to camera via gphoto2...")
-        camera = gphoto.open_camera()
+        print(f"Connecting to camera via {args.camera_backend}...")
+        camera = args.cam.open_camera()
         print("Connected.\n")
 
     try:
@@ -405,7 +415,7 @@ def main():
             if state.get('flats') and not args.dry_run:
                 flats = {ch: np.load(p) for ch, p in state['flats'].items()}
             if not args.dry_run:
-                gphoto.set_shutter_speed(camera, state['calibration']['shutter_speed'])
+                args.cam.set_shutter_speed(camera, state['calibration']['shutter_speed'])
 
         levels = state['calibration']['channel_levels']
         print(f"Session: {session_dir}  film={state['film_stock']}  roll={state['roll_id']}")
@@ -421,7 +431,7 @@ def main():
         pb = args.preview_brightness
         scanlight.set_color(pb, pb, pb, 0, 0, 255)
         scanlight.close()
-        gphoto.close_camera(camera)
+        args.cam.close_camera(camera)
 
 
 if __name__ == '__main__':

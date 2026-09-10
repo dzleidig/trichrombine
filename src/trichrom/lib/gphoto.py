@@ -1,13 +1,16 @@
 """
 Camera control via gphoto2: tethered shutter trigger and shutter-speed config.
 
-Capture One stays tethered separately for live view and file import — this module
-only fires the shutter and waits for the camera's own confirmation that the
-exposure completed. Fixed sleeps are avoided: they're either too slow (wasted time
-every frame) or too fast (the classic source of truncated/corrupt captures).
+An alternative to the Capture One backend, for driving the camera directly. Note
+that Sony's PC Remote connection allows one controlling host at a time, so this
+generally cannot run alongside a Capture One tether — and gphoto2's Sony support is
+reverse-engineered per body (there is an unresolved capture failure reported against
+the ILCE-7RM5). Prefer the captureone backend unless it proves unworkable.
+
+Fixed sleeps are avoided: they're either too slow (wasted time every frame) or too
+fast (the classic source of truncated/corrupt captures).
 """
 
-import math
 import sys
 import time
 
@@ -73,28 +76,3 @@ def set_shutter_speed(camera, value, dry_run=False):
     config, widget = _shutter_widget(camera)
     widget.set_value(value)
     camera.set_config(config)
-
-
-def shutter_str_to_seconds(s):
-    """Parse a gphoto2 shutter-speed string ('1/125', '0.5', '2', 'bulb') to seconds."""
-    s = s.strip()
-    if s.lower() == 'bulb':
-        return None
-    if '/' in s:
-        num, den = s.split('/', 1)
-        return float(num) / float(den)
-    return float(s)
-
-
-def nearest_shutter_choice(choices, target_seconds):
-    """Pick the choice whose duration is closest to target_seconds, on a log scale
-    (shutter speeds are geometric, so ratio error is what matters, not absolute)."""
-    best, best_dist = None, None
-    for c in choices:
-        secs = shutter_str_to_seconds(c)
-        if secs is None or secs <= 0:
-            continue
-        dist = abs(math.log(secs) - math.log(target_seconds))
-        if best_dist is None or dist < best_dist:
-            best_dist, best = dist, c
-    return best

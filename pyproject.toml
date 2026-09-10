@@ -20,13 +20,15 @@ dependencies = [
     "pyexiv2",
     "pyserial",
     "scipy",     # leader-density masking, flat-field smoothing
-    "gphoto2",   # tethered shutter trigger + shutter-speed control
 ]
 
 [project.scripts]
 trichrom-scan = "trichrom.scan:main"
 
 [project.optional-dependencies]
+gphoto = [
+    "gphoto2",   # only for --camera-backend gphoto2; the default drives Capture One
+]
 dev = [
     "pytest>=7.0",
 ]

@@ -8,16 +8,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -e .
 ```
 
-Dependencies: `rawpy`, `tifffile`, `pyexiv2`, `numpy`, `pyserial`, `scipy`, `gphoto2` (python-gphoto2 — needs `libgphoto2` installed on the system). Python 3.14 (see `.tool-versions`).
+Dependencies: `rawpy`, `tifffile`, `pyexiv2`, `numpy`, `pyserial`, `scipy`. Python 3.14 (see `.tool-versions`). The optional `gphoto` extra (`pip install -e ".[gphoto]"`) adds python-gphoto2, needed only for `--camera-backend gphoto2`; it also needs `libgphoto2` on the system.
 
 ## Hardware
 
 Sony A7R V, Sigma 105mm f/2.8 DG DN Macro (manual focus, f/8), JackW Big ScanLight
 (narrowband RGB LED, RP2040) over USB serial, Negative Supply 35mm MK2 holder on a
-Kaiser RS1 copy stand. Capture One stays tethered for live view only; the camera
-shutter is triggered directly via `gphoto2` (the ScanLight's own shutter trigger
-isn't usable on Sony bodies), and Capture One imports whatever lands regardless of
-what triggered it.
+Kaiser RS1 copy stand.
+
+**Capture One owns the camera.** It holds the tether for live view and focus
+magnification, writes the ARWs, and fires the shutter on our behalf via AppleScript.
+Sony's PC Remote connection allows one controlling host at a time, so driving the
+camera directly (gphoto2, CRSDK) generally means losing the live view that focusing
+depends on. The ScanLight's own shutter trigger isn't usable on Sony bodies either.
+`--camera-backend gphoto2` drives the camera directly as a fallback, but gphoto2's
+Sony support is reverse-engineered per body and there's an unresolved capture failure
+reported against the ILCE-7RM5 — prefer the Capture One path.
 
 Trichromatic (3-shot): fire red, green, blue in sequence and merge the clean
 per-channel exposures — no crosstalk to correct, since only one narrowband LED is
@@ -33,7 +39,8 @@ trichrom-scan --session-dir /path/to/session --watch-dir /path/to/captures \
 ```
 
 `--output-dir` defaults to `--watch-dir` (merged TIFFs land next to the ARWs); pass
-it explicitly to write merged TIFFs somewhere else.
+it explicitly to write merged TIFFs somewhere else. `--camera-backend` selects how the
+shutter fires — `captureone` (default) or `gphoto2`.
 
 A brand-new `--session-dir` (or `--recalibrate`) runs calibration first: ~5 minutes
 of LED warm-up, per-channel flats (holder off, bare light), then a leader-based
@@ -61,7 +68,9 @@ There are no tests or linting configured.
 src/trichrom/
 ├── lib/
 │   ├── scanner.py       # Scanlight serial control, channel sampling, file watching
-│   ├── gphoto.py         # gphoto2 shutter trigger + shutter-speed control
+│   ├── captureone.py     # camera backend: shutter + settings via C1 AppleScript (default)
+│   ├── gphoto.py         # camera backend: direct camera control via gphoto2
+│   ├── shutter.py        # shutter-speed parsing/selection shared by both backends
 │   ├── rawio.py          # rawpy read + Bayer plane extraction helpers
 │   ├── leader.py         # film-base density measurement (variance-masked, percentile)
 │   ├── flatfield.py       # per-channel flat-field build + apply
@@ -117,12 +126,33 @@ RGB→XYZ matrix via the standard primaries+whitepoint derivation, and a `curv` 
 tag with zero curve points (the ICC-spec encoding for an identity/linear
 response).
 
+**Camera backends** — `scan.py` reaches the camera through six functions
+(`open_camera`, `close_camera`, `trigger_and_wait`, `get_shutter_speed`,
+`get_shutter_choices`, `set_shutter_speed`) implemented by both `lib/captureone.py`
+and `lib/gphoto.py`. `--camera-backend` picks one; `main()` resolves it once and
+stashes the module on `args.cam`, which is already threaded through every function
+that touches the camera, so call sites read `args.cam.trigger_and_wait(...)`.
+
+**`lib/captureone.py`** (default) — drives C1 over `osascript`. `trigger_and_wait()`
+runs `tell application "Capture One" to capture`; C1's capture is asynchronous, so it
+only confirms the command was accepted and the caller's `wait_for_new_file()` remains
+the signal that matters. `shutter speed of camera of current document` is confirmed
+readable; whether C1 exposes it as *writable* is undocumented and may vary by body, so
+`set_shutter_speed()` falls back to prompting the operator to dial it in if the write is
+refused — a once-per-roll calibration step, never in the per-frame path.
+`get_shutter_choices()` tries `available shutter speeds` and falls back to the standard
+ladder in `lib/shutter.py`. Shutter values are checked for quote/backslash before being
+interpolated into AppleScript.
+
 **`lib/gphoto.py`** — `trigger_and_wait()` fires the shutter and blocks on
 `wait_for_event()` for `GP_EVENT_CAPTURE_COMPLETE`/`GP_EVENT_FILE_ADDED` rather
 than a fixed sleep (too-fast sleeps are the classic source of truncated
 captures). Shutter speed is read/set via the camera's `shutterspeed` config
-widget; `nearest_shutter_choice()` picks the closest available value to a target
-duration on a log scale, since shutter steps are geometric.
+widget. Its import is guarded, so the package works without python-gphoto2 installed.
+
+**`lib/shutter.py`** — `nearest_shutter_choice()` picks the closest available value to a
+target duration on a log scale, since shutter steps are geometric; `STANDARD_CHOICES` is
+the 1/3-stop ladder used when a backend can't report the camera's own list.
 
 **`lib/session_state.py`** — `session.json` lives in the session folder so
 provenance travels with the roll if it's moved or archived. A separate small

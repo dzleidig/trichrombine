@@ -1,11 +1,10 @@
 """
-Shared hardware utilities: Scanlight serial control, Capture One triggering,
-ARW file watching, and raw channel sampling.
+Shared hardware utilities: Scanlight serial control, ARW file watching, and raw
+channel sampling. Camera control lives in the backend modules (captureone, gphoto).
 """
 
 import glob
 import os
-import subprocess
 import sys
 import time
 
@@ -18,8 +17,6 @@ except ImportError:
 BAUD_RATE = 115200
 PACKET_START = 0xFE
 PKT_H2D_SET_COLOR = 0x00
-
-CAPTURE_ONE_APP = "Capture One"
 
 BAYER_INDEX = {'R': 0, 'G': 1, 'B': 2}
 # Bayer channel indices contributing to each LED channel: green averages both
@@ -86,21 +83,6 @@ class Scanlight:
     def __exit__(self, *args):
         self.set_color(*OFF, 255)
         self.close()
-
-
-def trigger_capture(dry_run):
-    script = f'tell application "{CAPTURE_ONE_APP}" to capture'
-    if dry_run:
-        print(f"  [dry-run] osascript: {script}")
-        return True
-    result = subprocess.run(
-        ['osascript', '-e', script],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"  WARNING: AppleScript error: {result.stderr.strip()}")
-        return False
-    return True
 
 
 def wait_for_new_file(watch_dir, before, timeout):
