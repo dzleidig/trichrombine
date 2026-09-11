@@ -1,9 +1,9 @@
 """
 Merge a trichromatic (3-shot) R/G/B ARW triplet into a linear TIFF.
 
-Each exposure carries one clean narrowband channel — no crosstalk correction is
-needed like the single-shot path, since only the matching CFA plane is ever read
-from each file. Unity white balance throughout: with no cross-channel
+Each exposure carries one clean narrowband channel, and only the matching CFA
+plane is ever read from each file — so there is no LED crosstalk to correct.
+Unity white balance throughout: with no cross-channel
 interpolation to assist it, and no meaningful single-channel as-shot value, the
 camera's per-channel WB guess is recorded in metadata as documentation only and
 never applied. No lens/vignetting correction (flats handle falloff) and no DCP or
