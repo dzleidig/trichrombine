@@ -110,19 +110,19 @@ def capture_flats(scanlight, camera, args, session_dir):
     flat_paths = {}
     for ch in CHANNELS:
         print(f"[{ch}] Shooting {args.flat_shots} flat exposures at brightness {args.flat_brightness}...")
-        raws, pattern, black = [], None, None
+        raws, pattern, black, sizes = [], None, None, None
         for _ in range(args.flat_shots):
             path = _shoot(scanlight, camera, args, ch, args.flat_brightness)
             if args.dry_run:
                 continue
             raw = read_raw(path)
             raws.append(raw['image'])
-            pattern, black = raw['pattern'], raw['black_level_per_channel']
+            pattern, black, sizes = raw['pattern'], raw['black_level_per_channel'], raw['sizes']
 
         if args.dry_run:
             continue
 
-        flat = build_channel_flat(raws, pattern, CHANNEL_BAYER_INDICES[ch], black)
+        flat = build_channel_flat(raws, pattern, CHANNEL_BAYER_INDICES[ch], black, sizes)
         flat_path = flats_dir / f'{ch}.npy'
         np.save(flat_path, flat)
         flat_paths[ch] = flat_path

@@ -3,24 +3,23 @@
 import numpy as np
 from scipy.ndimage import uniform_filter
 
-from .rawio import extract_bayer_channel
+from .rawio import crop_half_res, extract_led_channel_plane
 
 
-def build_channel_flat(raw_images, pattern, channel_indices, black_levels, smooth_size=201):
+def build_channel_flat(raw_images, pattern, channel_indices, black_levels, sizes, smooth_size=201):
     """
-    Average several black-subtracted raw exposures of one LED channel, extract the
-    matching Bayer plane(s), smooth out grain, and normalize so the peak is 1.0.
+    Average several black-subtracted raw exposures of one LED channel, smooth out
+    grain, and normalize so the peak is 1.0.
 
-    channel_indices is (ch,) for R/B or (g0, g2) for green — planes are averaged
-    together (at matching half-resolution) before the light-falloff smoothing.
+    channel_indices is (ch,) for R/B or (g0, g2) for green — the green photosite
+    planes are averaged together. The result is cropped to the active sensor area
+    (via the same extract + crop the signal path uses) so the flat and the frames
+    it divides are the same shape; the sensor margins are nonzero on real bodies.
     """
-    planes = []
-    for image in raw_images:
-        chans = []
-        for idx in channel_indices:
-            data, _, _ = extract_bayer_channel(image, pattern, idx)
-            chans.append(data.astype(np.float64) - black_levels[idx])
-        planes.append(np.mean(chans, axis=0))
+    planes = [
+        crop_half_res(extract_led_channel_plane(image, pattern, channel_indices, black_levels), sizes)
+        for image in raw_images
+    ]
     averaged = np.maximum(np.mean(planes, axis=0), 0)
 
     flat = uniform_filter(averaged, size=smooth_size)
