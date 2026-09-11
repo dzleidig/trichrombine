@@ -7,6 +7,7 @@ without typing paths — losing that pointer costs convenience, not data.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -41,8 +42,15 @@ def load_session(session_dir):
 
 
 def save_session(session_dir, state):
-    with open(_session_file(session_dir), 'w') as f:
+    # Write-then-rename so an interrupted write can't truncate the existing
+    # session file: this is rewritten after every frame and is the roll's only
+    # record of which frames succeeded, so a half-written file would lose exactly
+    # the provenance it exists to preserve.
+    target = _session_file(session_dir)
+    tmp = target.with_suffix('.json.tmp')
+    with open(tmp, 'w') as f:
         json.dump(state, f, indent=2)
+    os.replace(tmp, target)
     _set_last_session(session_dir)
 
 

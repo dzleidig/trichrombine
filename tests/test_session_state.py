@@ -100,3 +100,12 @@ def test_session_file_is_human_readable(tmp_path):
     session_dir = tmp_path / 'r'
     session_state.new_session(session_dir, 'Portra 400', 'roll01')
     assert json.loads((session_dir / 'session.json').read_text())['film_stock'] == 'Portra 400'
+
+
+def test_save_leaves_no_temp_file_behind(tmp_path):
+    """The atomic write-then-rename must not leave its scratch file in the
+    session folder, which is meant to hold only the roll's own artifacts."""
+    session_dir = tmp_path / 'r'
+    state = session_state.new_session(session_dir, 'HP5', 'r1')
+    session_state.save_session(session_dir, state)
+    assert list(session_dir.glob('*.tmp')) == []
