@@ -98,21 +98,37 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta):
     return peaks
 
 
+# All of this describes the digitization camera copying the negative, not the
+# original photograph — it's provenance of the scan. The JSON sidecar is the
+# authoritative record; this is a convenience copy for tools that read EXIF.
+# Missing keys are skipped, so entries absent on a given body are harmless.
 _PRESERVED_EXIF_KEYS = [
-    'Exif.Photo.LensModel', 'Exif.Photo.FocalLengthIn35mmFilm', 'Exif.Photo.FocalLength',
-    'Exif.Photo.FNumber', 'Exif.Photo.ExposureTime', 'Exif.Image.Make', 'Exif.Image.Model',
-    'Exif.Image.DateTime', 'Exif.Sony2.SonyModelID', 'Exif.Sony2.LensID',
-    'Exif.Photo.ISOSpeedRatings',
+    # Camera + lens identity
+    'Exif.Image.Make', 'Exif.Image.Model', 'Exif.Image.Software',
+    'Exif.Photo.BodySerialNumber', 'Exif.Photo.LensModel',
+    'Exif.Sony2.SonyModelID', 'Exif.Sony2.LensID',
+    # Copy-shot exposure settings
+    'Exif.Photo.FNumber', 'Exif.Photo.ExposureTime', 'Exif.Photo.ISOSpeedRatings',
+    'Exif.Photo.FocalLength', 'Exif.Photo.FocalLengthIn35mmFilm',
+    # When the scan was made
+    'Exif.Image.DateTime', 'Exif.Photo.DateTimeOriginal',
 ]
 
 
 def _preserve_exif(source_arw, output_tiff):
-    """Copy lens/exposure EXIF from the (red) source ARW into the merged TIFF.
+    """Copy provenance EXIF from the (red) source ARW into the merged TIFF.
     Source ARWs themselves are never modified — they're intermediate files."""
     with pyexiv2.Image(str(source_arw)) as src:
         exif_data = src.read_exif()
     preserved = {k: exif_data[k] for k in set(_PRESERVED_EXIF_KEYS).intersection(exif_data.keys())}
     if not preserved:
         return
-    with pyexiv2.Image(str(output_tiff)) as dst:
-        dst.modify_exif(preserved)
+    try:
+        with pyexiv2.Image(str(output_tiff)) as dst:
+            dst.modify_exif(preserved)
+    except Exception as e:
+        # EXIF embedding is a convenience — the sidecar holds full provenance.
+        # Sony MakerNote tags in particular may not write cleanly into a non-ARW
+        # TIFF; never let that cost the merged frame.
+        print(f"  NOTE: could not embed EXIF in {output_tiff.name} ({e}); "
+              f"sidecar JSON still carries full provenance.")

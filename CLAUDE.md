@@ -229,6 +229,15 @@ is unverified whether it fires *after* the file is fully written, so keep the se
 check as a guard. Worth doing once the trigger path is proven, or sooner if
 `wait_for_new_file` + settle proves flaky in practice.
 
+**EXIF embedding is unverified but non-fatal.** Whether pyexiv2 writes the preserved
+EXIF cleanly into the tifffile-produced TIFF — and whether the `Exif.Sony2.*`
+MakerNote tags survive into a non-ARW container at all — can't be tested without a
+real ARW. `_preserve_exif` now catches a write failure and continues (the JSON
+sidecar carries authoritative provenance either way), so a bad tag costs the embedded
+EXIF, not the frame. If the Sony MakerNote tags prove troublesome at the rig, drop
+them from `_PRESERVED_EXIF_KEYS`. `Exif.Image.Orientation` is deliberately not
+preserved — a copy-stand scan is rotated/cropped downstream in Capture One.
+
 **Minor code notes** (deliberately left as-is): `adjust_exposure` uses the R channel's
 black level for all three channels' usable-range math — harmless while the A7R V
 reports equal black levels across channels. A mid-roll merge failure prints the
