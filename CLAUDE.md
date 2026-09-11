@@ -83,7 +83,7 @@ and confirm the relevant test fails.
 ```
 src/trichrom/
 ├── lib/
-│   ├── scanner.py       # Scanlight serial control, channel sampling, file watching
+│   ├── scanner.py       # Scanlight serial control + ARW file watching
 │   ├── captureone.py     # camera backend: shutter + settings via C1 AppleScript (default)
 │   ├── gphoto.py         # camera backend: direct camera control via gphoto2
 │   ├── shutter.py        # shutter-speed parsing/selection shared by both backends

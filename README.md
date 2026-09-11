@@ -12,15 +12,13 @@ time.
 
 ## Background
 
-For information on the benefits of narrowband scanning over broad spectrum:
+On the benefits of narrowband RGB scanning over broad spectrum for colour negative:
 - https://jackw01.github.io/scanlight/
 - https://medium.com/@alexi.maschas/color-negative-film-color-spaces-786e1d9903a4
 
-Trichromatic (3-shot) scanning is the cleanest approach to narrowband scanning:
-fire only the red LED and capture, then green, then blue, then merge the three
-frames. Each frame captures one pure channel with no contamination from the
-others — there's no LED spectral overlap to correct, since the other two LEDs are
-off. The cost is speed: three exposures per frame instead of one.
+Three-shot is the cleanest form of it: because each frame is lit by a single
+narrowband LED, each captures one pure channel with no spectral overlap to correct.
+The cost is speed — three exposures per frame instead of one.
 
 ## Hardware
 
