@@ -186,3 +186,48 @@ between polls, so `capture_frame()` settles each file before firing the next
 channel. That per-channel settle isn't about read integrity (only the merge reads);
 it's what keeps one trigger mapped to one file, and therefore what keeps
 filename→channel attribution correct.
+
+## Open items
+
+The code paths that touch Capture One and the camera cannot be exercised without the
+rig (macOS + C1 + tethered A7R V), so the following are unverified against real
+hardware. The Capture One backend is written to the documented AppleScript surface
+but has only been dry-run tested.
+
+**Verify before the first real roll** (all quick checks at the rig):
+
+1. **Trigger fires.** `tell application "Capture One" to capture` actually releases the
+   shutter on the A7R V with C1 tethered. Known to work on an A7 III; unverified on
+   this body. If it fails, see the fallback below.
+2. **`capture` must not autofocus.** AF on a flat negative is unreliable and, worse,
+   firing it between the three exposures shifts focus across channels — the spec's
+   "no autofocus, ever." A community remote-trigger script initiates AF as an
+   *explicit separate step*, which implies plain `capture` does not focus, but confirm
+   the lens doesn't hunt on a bare `capture`.
+3. **`capture` coexists with continuous live view.** We keep live view up for the whole
+   roll (for focus magnification); a common community script instead opens live view,
+   shoots, and closes it each time. Confirm capture works without closing live view.
+4. **Is `shutter speed` writable?** Capture One → Scripts → Open Scripting Dictionary →
+   `camera` class: `shutter speed (text)` means settable, `(text, r/o)` means read-only.
+   If read-only, nothing breaks — `set_shutter_speed()` already degrades to prompting
+   the operator during calibration — but you'll dial shutter speed by hand each pass-2
+   iteration. Reading it is already confirmed to work.
+
+**Fallback if the C1 trigger doesn't work:** `--camera-backend gphoto2` drives the
+camera directly, but there's an open unresolved gphoto2 capture failure against the
+ILCE-7RM5 (gphoto2 issue #676), so it may not work either. Next candidate is Sony's
+**Camera Remote Command** (official CLI, macOS) before CrSDKPy (which needs a
+self-built C++ bridge and is Windows-tested only).
+
+**Fast-follow, only if warranted:** replace the poll-and-settle file detection with a
+Capture One Background Script bound to `CO_CaptureDone(rawFilePath)`, which hands us
+the captured file's path directly — eliminating the folder race and the settle
+guesswork (see the `lib/scanner.py` note above). The mechanism is undocumented and it
+is unverified whether it fires *after* the file is fully written, so keep the settle
+check as a guard. Worth doing once the trigger path is proven, or sooner if
+`wait_for_new_file` + settle proves flaky in practice.
+
+**Minor code notes** (deliberately left as-is): `adjust_exposure` uses the R channel's
+black level for all three channels' usable-range math — harmless while the A7R V
+reports equal black levels across channels. A mid-roll merge failure prints the
+exception message but not a traceback.
