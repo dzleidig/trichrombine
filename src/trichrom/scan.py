@@ -59,6 +59,23 @@ CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
 # Shared hardware helpers
 # --------------------------------------------------------------------------
 
+def wait_for_settle(path, timeout=10.0, min_age_seconds=SETTLE_SECONDS):
+    """Wait for the ARW's size to stop changing before reading it — the classic
+    source of intermittent corruption is reading a half-written raw."""
+    deadline = time.monotonic() + timeout
+    last_size = -1
+    while time.monotonic() < deadline:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            time.sleep(0.1)
+            continue
+        if stat.st_size == last_size and time.time() - stat.st_mtime >= min_age_seconds:
+            return
+        last_size = stat.st_size
+        time.sleep(0.2)
+
+
 def _shoot(scanlight, camera, args, ch, level):
     rgb = [0, 0, 0]
     rgb[CHANNEL_SLOT[ch]] = level
@@ -78,7 +95,13 @@ def _shoot(scanlight, camera, args, ch, level):
     if filename is None:
         print(f"  WARNING: no file appeared for channel {ch}.")
         return None
-    return Path(args.watch_dir) / filename
+    path = Path(args.watch_dir) / filename
+    # wait_for_new_file returns as soon as the name appears, which for a tether
+    # writing in place is before the ~100MB raw is finished. Settle here so every
+    # consumer — calibration, flats, and the capture loop alike — reads a complete
+    # file, and so only one new ARW exists before the next channel fires.
+    wait_for_settle(path)
+    return path
 
 
 def _measure_channel_level(path, ch, flats):
@@ -247,33 +270,15 @@ def run_calibration(scanlight, camera, args, state, session_dir):
 # Capture and merge
 # --------------------------------------------------------------------------
 
-def wait_for_settle(path, timeout=10.0, min_age_seconds=SETTLE_SECONDS):
-    """Wait for the ARW's size to stop changing before reading it — the classic
-    source of intermittent corruption is reading a half-written raw."""
-    deadline = time.monotonic() + timeout
-    last_size = -1
-    while time.monotonic() < deadline:
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            time.sleep(0.1)
-            continue
-        if stat.st_size == last_size and time.time() - stat.st_mtime >= min_age_seconds:
-            return
-        last_size = stat.st_size
-        time.sleep(0.2)
-
-
 def capture_frame(scanlight, camera, args, levels):
     """Fire R, G, B in sequence and return {ch: Path} once all three have landed
-    and settled on disk, or a partial dict if a channel failed."""
+    and settled on disk (settling happens in _shoot), or a partial dict if a
+    channel failed."""
     captured = {}
     for ch in CHANNELS:
         path = _shoot(scanlight, camera, args, ch, levels[ch])
-        if path is None:
-            continue
-        wait_for_settle(path)
-        captured[ch] = path
+        if path is not None:
+            captured[ch] = path
     return captured
 
 

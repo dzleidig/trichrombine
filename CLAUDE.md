@@ -181,11 +181,13 @@ pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=
 3=G2 (second green in RGGB); black/white levels and active sensor area margins are
 read directly from source files — no camera-specific hardcoding.
 
-Note that `wait_for_new_file()` picks arbitrarily if more than one ARW appears
-between polls, so `capture_frame()` settles each file before firing the next
-channel. That per-channel settle isn't about read integrity (only the merge reads);
-it's what keeps one trigger mapped to one file, and therefore what keeps
-filename→channel attribution correct.
+Note that `wait_for_new_file()` returns as soon as a new ARW's name appears and
+picks arbitrarily if more than one is present, so `_shoot()` in `scan.py` calls
+`wait_for_settle()` before returning the path. That settle does double duty: it
+guarantees the file is fully written before anything reads it (calibration, flats,
+and merge all read through this one path), and by holding until the file is done it
+keeps one trigger mapped to one file, which is what keeps filename→channel
+attribution correct.
 
 ## Open items
 
