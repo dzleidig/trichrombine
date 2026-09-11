@@ -12,7 +12,7 @@ try:
     import serial
     import serial.tools.list_ports
 except ImportError:
-    sys.exit("pyserial not installed. Run: pip install trichrom[dev]")
+    sys.exit("pyserial not installed. Run: pip install -e .")
 
 BAUD_RATE = 115200
 PACKET_START = 0xFE

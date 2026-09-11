@@ -22,7 +22,7 @@ except ImportError:
 
 def open_camera():
     if gp is None:
-        sys.exit("python-gphoto2 not installed. Run: pip install trichrom[dev]")
+        sys.exit('python-gphoto2 not installed. Run: pip install "trichrom[gphoto]"')
     camera = gp.Camera()
     camera.init()
     return camera
@@ -38,7 +38,8 @@ def close_camera(camera):
 
 
 def trigger_and_wait(camera, timeout_ms=8000, dry_run=False):
-    """Trigger a capture and block until the camera confirms it wrote the file."""
+    """Trigger a capture and block until the camera reports the capture complete
+    (or the file added). The caller still waits for the ARW to land and settle."""
     if dry_run:
         print("  [dry-run] gphoto2: trigger_capture")
         return
