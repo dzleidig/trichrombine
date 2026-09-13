@@ -43,7 +43,7 @@ from .lib import captureone, gphoto, session_state
 from .lib.flatfield import FLAT_TARGET, build_channel_flat, flat_level
 from .lib.leader import measure_leader_level
 from .lib.merge_tri import merge_triplet
-from .lib.rawio import crop_half_res, extract_led_channel_plane, read_raw
+from .lib.rawio import crop_half_res, extract_led_channel_plane, read_raw, verify_channel
 from .lib.scanner import CHANNEL_BAYER_INDICES, Scanlight, find_scanlight_port, wait_for_new_file
 from .lib.shutter import nearest_shutter_choice, shutter_str_to_seconds
 
@@ -140,8 +140,23 @@ def _require_shot(scanlight, camera, args, ch, level, what):
     return path
 
 
-def _measure_channel_level(path, ch, flats):
+def _read_verified(path, ch, what):
+    """read_raw for the calibration path, refusing a frame that wasn't lit by the LED
+    we think it was.
+
+    Fatal here where the capture loop only loses a frame: calibration sets the channel
+    balance and shutter speed for the whole roll, so a mis-attributed frame doesn't
+    spoil one image, it quietly mis-exposes every one that follows."""
     raw = read_raw(path)
+    try:
+        verify_channel(raw, ch, CHANNEL_BAYER_INDICES)
+    except ValueError as exc:
+        sys.exit(f"Calibration aborted on the {what} frame for channel {ch}: {exc}")
+    return raw
+
+
+def _measure_channel_level(path, ch, flats):
+    raw = _read_verified(path, ch, 'leader-level')
     plane = extract_led_channel_plane(raw['image'], raw['pattern'], CHANNEL_BAYER_INDICES[ch],
                                        raw['black_level_per_channel'])
     plane = crop_half_res(plane, raw['sizes'])
@@ -168,7 +183,7 @@ def _probe_flat_power(scanlight, camera, args, ch):
     if args.dry_run:
         return args.flat_brightness
 
-    raw = read_raw(path)
+    raw = _read_verified(path, ch, 'flat-field probe')
     level = flat_level(raw['image'], raw['pattern'], CHANNEL_BAYER_INDICES[ch],
                        raw['black_level_per_channel'], raw['sizes'], raw['white_level'])
     if level <= 0:
@@ -204,7 +219,7 @@ def capture_flats(scanlight, camera, args, session_dir):
             path = _require_shot(scanlight, camera, args, ch, power, 'flat-field')
             if args.dry_run:
                 continue
-            raw = read_raw(path)
+            raw = _read_verified(path, ch, 'flat-field')
             raws.append(raw['image'])
             pattern, black, sizes, white_level = (raw['pattern'], raw['black_level_per_channel'],
                                                   raw['sizes'], raw['white_level'])
@@ -409,7 +424,8 @@ def run_capture_loop(scanlight, camera, args, state, flats, levels):
             'shutter_speed': state['calibration']['shutter_speed'],
         }
         try:
-            peaks = merge_triplet(captured['R'], captured['G'], captured['B'], flats, output_path, meta)
+            peaks = merge_triplet(captured['R'], captured['G'], captured['B'], flats, output_path,
+                                  meta, full_resolution=args.resolution == 'full')
             print(f"  Frame {frame} -> {output_path}")
             for ch in CHANNELS:
                 print(f"    [{ch}] peak={peaks[ch]:.3f}")
@@ -442,6 +458,10 @@ def main():
     parser.add_argument('--port', help='Scanlight serial port (default: auto-detect)')
     parser.add_argument('--camera-backend', choices=sorted(CAMERA_BACKENDS), default='captureone',
                         help='How the shutter is fired (default: captureone)')
+    parser.add_argument('--resolution', choices=('full', 'half'), default='full',
+                        help='full interpolates each channel from its measured sites to the '
+                             'sensor\'s full pixel count; half emits one pixel per measured '
+                             'photosite, interpolating nothing (default: full)')
     parser.add_argument('--recalibrate', action='store_true', help='Force recalibration even if already calibrated')
     parser.add_argument('--dry-run', action='store_true', help='Print actions without touching hardware')
 

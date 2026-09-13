@@ -18,13 +18,23 @@ authors = [
     {name = "Dylan Leidig", email = "dzleidig@gmail.com"}
 ]
 
+# Floors are set at the first release that ships official wheels for every Python
+# this project supports, which is a correctness constraint rather than a taste one.
+# With no floor, pip on 3.14 happily fell back to building numpy 2.2.1 from source —
+# a release that predates 3.14 by a year — and the resulting numpy returned silently
+# wrong answers from scipy.ndimage: measure_leader_level read 1008232 where it should
+# read 1000. Nothing raised. That sets the exposure target for a whole roll, so it
+# would have mis-exposed every frame rather than failing.
+#
+# Only the three that link numpy's C ABI need this; the rest are pure Python or do
+# not touch numpy, so they carry no floor.
 dependencies = [
-    "numpy",
-    "rawpy",
+    "numpy>=2.3.2",    # first numpy with cp314 wheels
+    "scipy>=1.16.1",   # first scipy with cp314 wheels; leader masking, flat smoothing
+    "rawpy>=0.26.0",   # first rawpy with cp314 wheels
     "tifffile",
     "pyexiv2",
     "pyserial",
-    "scipy",     # leader-density masking, flat-field smoothing
 ]
 
 [project.scripts]

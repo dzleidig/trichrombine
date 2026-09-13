@@ -10,6 +10,30 @@ python -m pip install -e .
 
 Dependencies: `rawpy`, `tifffile`, `pyexiv2`, `numpy`, `pyserial`, `scipy`. Python 3.11+ — that floor comes from numpy/scipy/tifffile, which is why it can't go lower; development and CI run 3.14 (see `.tool-versions`), so 3.14 is the only version formally tested. The optional `gphoto` extra (`pip install -e ".[gphoto]"`) adds python-gphoto2, needed only for `--camera-backend gphoto2`; it also needs `libgphoto2` on the system.
 
+**Do not loosen the version floors in `pyproject.toml`.** `numpy`, `scipy` and `rawpy`
+are floored at the first release shipping official wheels for every supported Python,
+and that is a correctness constraint, not tidiness. Unfloored, `pip install -e .` on
+3.14 accepted an already-installed numpy 2.2.1 — a release predating 3.14 by a year,
+which pip had earlier built from source because no wheel existed. The resulting numpy
+returned silently wrong answers from `scipy.ndimage`: `measure_leader_level` read
+1008232 where it should read 1000, with arrays reading back values that could not
+coexist (a buffer holding squared values while the variance computed from it was
+correct). Nothing raised. Since that function sets the exposure target for a whole
+roll, it would have mis-exposed every frame rather than failing.
+
+The floors matter because pip leaves an *already-satisfied* requirement alone: with no
+floor a stale broken numpy survives `pip install -e .`, and with one it gets upgraded.
+Only the three that link numpy's C ABI carry floors; the rest are pure Python or do not
+touch numpy.
+
+To check an environment is sound, run the test suite — `test_leader.py` is what caught
+this, and it fails loudly on a broken stack. To verify no dependency needs a source
+build at all:
+
+```bash
+python -m pip install --only-binary=numpy,scipy,rawpy -e ".[dev]"
+```
+
 ## Hardware
 
 Sony A7R V, Sigma 105mm f/2.8 DG DN Macro (manual focus, f/8), JackW Big ScanLight
@@ -70,8 +94,9 @@ python -m pytest
 (`python -m` rather than the bare `pytest` script guarantees the tests run under the
 same interpreter the dependencies were installed into.)
 
-Tests cover the pure logic that fails *silently* — merge math, the ICC profile, leader
-measurement, shutter selection, flat-field build, session state. No hardware, no ARWs,
+Tests cover the pure logic that fails *silently* — merge math, channel verification,
+full-resolution reconstruction, the ICC profile, leader measurement, shutter selection,
+flat-field build, LED warm-up, session state. No hardware, no ARWs,
 sub-second. The camera backends and capture loop are deliberately untested: without a
 camera attached there's nothing meaningful to assert. No linting is configured.
 
@@ -184,8 +209,26 @@ raises outside `[FLAT_MIN, FLAT_MAX]` rather than returning a quietly bad flat.
 **`lib/merge_tri.py`** — for each of the three exposures, extracts only the
 matching CFA plane (red from the red exposure, etc.; green averages G+G2),
 normalizes by `(white_level - black_level)`, divides by that channel's flat, and
-stacks into a linear `(h/2, w/2, 3)` TIFF — already effectively "demosaiced" since
-each output pixel came from one cleanly-lit photosite, no interpolation needed.
+stacks into a linear TIFF.
+
+`--resolution` picks what happens next, and the distinction is worth holding onto:
+three-shot removes the *spectral* mixing between channels but not the *spatial*
+sparsity of the CFA. Red is measured at a quarter of the photosites no matter which
+LED is lit, so the two options are `half` — emit one pixel per measured photosite,
+`(h/2, w/2, 3)`, nothing interpolated — or `full` (default), which reconstructs each
+channel from its own measured sites up to `(h, w, 3)`. `full` is a cleaner
+reconstruction than demosaicing a single Bayer frame, since no channel has
+contamination from the others to unpick, but it is still interpolation. Which one
+produced a file is recorded in the TIFF metadata and the sidecar; that is provenance,
+not trivia, since it decides what the file can honestly be compared against.
+
+Measured ~3s per frame at full resolution against ~0.6s at half on an Apple-silicon
+Mac, TIFF write included and channel verification included, for a 61MP frame. Note that a CI/container box measured
+roughly 3x slower — quote the machine along with the number.
+
+The per-channel drift peak is taken from the measured photosites, before any
+reconstruction. That keeps it meaning the same thing at either `--resolution` (so
+peaks stay comparable across a roll shot both ways) and reads a quarter as much data.
 
 ```mermaid
 flowchart LR
@@ -197,14 +240,20 @@ flowchart LR
     GP --> GN["crop to active area<br/>÷ (white − black)"] --> GF["÷ flat G"] --> S
     BP --> BN["crop to active area<br/>÷ (white − black)"] --> BF["÷ flat B"] --> S
 
-    S["stack → (h/2, w/2, 3)"] --> TIFF[("linear 16-bit TIFF<br/>+ linear-ProPhoto ICC")]
-    S --> JSON[("JSON sidecar")]
+    S{"--resolution"}
+    S -->|half| HALF["stack → (h/2, w/2, 3)<br/><i>every value measured</i>"]
+    S -->|full| FULL["reconstruct each channel<br/>from its own sites<br/>→ (h, w, 3)"]
+    HALF --> TIFF[("linear 16-bit TIFF<br/>+ linear-ProPhoto ICC")]
+    FULL --> TIFF
+    TIFF --> JSON[("JSON sidecar")]
 ```
 
-The three columns never mix — that is the whole point of shooting trichromatically.
-There is no crosstalk term because no pixel ever saw two LEDs, and no demosaic step
-because every output pixel is one real photosite rather than an interpolation of its
-neighbours.
+The three columns never mix, which is the whole point of shooting trichromatically:
+there is no crosstalk term because no pixel ever saw two LEDs, and no *cross-channel*
+demosaic because nothing a channel needs is ever taken from another one. That holds at
+either resolution. What differs is within a column — `half` emits only photosites that
+were really read, while `full` fills the gaps between them from that same channel's
+measured sites.
 Unity white balance throughout: the camera's per-channel as-shot WB guess is
 recorded in metadata as documentation only, never applied. No lens/vignetting
 correction and no DCP/camera color matrix — sensor space is preserved for
@@ -250,6 +299,64 @@ pointer file (`~/.trichrom/last_session`) records the most recently used session
 dir for `--resume`; losing it costs convenience. Per-frame status is recorded so a
 mid-roll merge failure identifies exactly which frames need redoing.
 
+**`lib/rawio.py`** — rawpy read plus the Bayer plane helpers. `upsample_bayer_plane()`
+carries the full-resolution path, and three things in it are load-bearing rather than
+incidental, each found by a test that failed first:
+
+- **Per-site offsets.** R, G, G2 and B sit at four different corners of the 2×2 cell.
+  Interpolating each as though it began at (0, 0) leaves the finished channels shifted
+  half an output pixel against each other — colour fringing on every edge of every
+  frame, and no error anywhere. `active_site_offsets()` also folds in `margin % 2`, so
+  an odd active-area margin shifts the phase correctly instead of silently.
+- **Odd-reflection padding.** Cubic splines ring at an array boundary (a linear ramp
+  reconstructs its first interpolated sample at 0.84 where it should read 1.0), and the
+  output grid runs half a sample past the last measured site, where clamping would hold
+  the edge value. Padding with `reflect_type='odd'` continues the edge gradient and
+  fixes both; padding with `'edge'` does not — a constant extension makes the spline
+  bend exactly where the real data starts.
+- **Two fixed kernels, not a general resampler.** The scale factor is exactly 2, so
+  every output sample lands either on a spline coefficient or exactly halfway between
+  two. Evaluation is therefore `KERNELS` — the B-spline basis at those two positions —
+  applied as separable slice arithmetic over `spline_filter` coefficients. Both general
+  evaluators were tried and both lost badly: `map_coordinates` wants a meshgrid of two
+  float64 arrays the size of the output (near a gigabyte at 61MP), `RectBivariateSpline`
+  spends more time in its fit than this whole routine takes, and `affine_transform` —
+  which looks like the natural fit — was slower than either. All agree to ~5e-7.
+
+  A caution for anyone testing this: a **linear** ramp is invariant under the
+  approximating filter `[1, 4, 1] / 6`, so a reconstruction that skipped the spline
+  prefilter entirely still reproduces a ramp perfectly. Only a curved field separates
+  interpolation from approximation, which is what `test_measured_sites_survive_a_curved_field`
+  is for.
+
+  At this array size **allocation dominates arithmetic**, so both the kernel
+  accumulation and the uint16 scaling write in place — into the output slice and one
+  reusable scratch buffer. The natural spellings (`acc = acc + weight * chunk`,
+  `clip(...) * 65535 + 0.5`) each allocate a couple of full-size temporaries per tap or
+  per channel, which is up to seven arrays of 60MP for the four-tap kernel and measured
+  ~35% of total merge time. Prefer in-place `np.multiply(..., out=)` and `+=` anywhere
+  in this path; the readable version is not free here the way it usually is.
+
+`verify_channel()` in the same module answers a question nothing else in the pipeline
+asks: was this frame really lit by the LED we think it was? Everything downstream keys
+off filename-to-channel attribution, and that rests on `wait_for_new_file()` returning
+the right file per trigger. Get it wrong and the merge writes a valid, sharp,
+correctly-exposed TIFF with two channels exchanged, raising nothing — you find out
+part-way through inverting a roll. Under one narrowband LED a single Bayer colour
+stands far above the others, so the argmax settles it with no calibration needed.
+
+It runs in two places, following the `_shoot`/`_require_shot` convention: inside
+`merge_triplet()`, where the raws are already open so it costs nothing and a raise
+becomes one failed frame; and via `_read_verified()` on the calibration path, where it
+is fatal, because a mis-attributed calibration frame does not spoil one image, it
+quietly mis-exposes the whole roll. Order of checks matters — black, then dominance,
+then identity: at low signal or under white light the argmax is decided by noise, so
+naming a channel would mislead rather than inform. `MIN_DOMINANCE` is deliberately
+conservative at 2.0; the true CFA ratio is far higher but has never been measured on
+this body, and the threshold's real job is separating one-LED light from the
+white-equivalent preview level, which sits near 1. The measured ratio goes into the
+sidecar, so a roll drifting toward 1 is visible after the fact.
+
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
 pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,
 3=G2 (second green in RGGB); black/white levels and active sensor area margins are
@@ -267,6 +374,9 @@ attribution correct.
 a timeout means the file is most likely still being written, which is the exact case
 the guard exists to catch. `_shoot()` therefore discards the path and returns `None`;
 losing one frame beats merging a truncated raw.
+
+That settle makes correct attribution *likely*; it cannot guarantee it, which is why
+`verify_channel()` reads it back from the pixels — see below.
 
 ## Open items
 
@@ -307,6 +417,23 @@ guesswork (see the `lib/scanner.py` note above). The mechanism is undocumented a
 is unverified whether it fires *after* the file is fully written, so keep the settle
 check as a guard. Worth doing once the trigger path is proven, or sooner if
 `wait_for_new_file` + settle proves flaky in practice.
+
+**Full-resolution reconstruction has never seen real film.** `--resolution full` is the
+default and its maths is well covered by tests, but no frame of actual negative has gone
+through it. What to watch for at the rig: cubic ringing on genuinely hard edges —
+sprocket holes, the film edge, a dust speck — and whether the extra pixels resolve
+anything the film actually holds. Shoot one frame both ways and compare before trusting
+it for a roll. `--resolution half` exists precisely as the fallback, and is why it
+should not be removed until `full` has been proven on film.
+
+**`MIN_DOMINANCE` is a guess, and the data to replace it is already being captured.**
+It sits at a conservative 2.0 because the CFA's transmission at the LED wavelengths has
+never been measured on this body. Calibration's flats are bare-light, one LED at a time —
+running `channel_means()` on one is exactly that measurement. Recording the real ratios
+in `session.json` would let the threshold come from the rig instead of a guess, and would
+double as a check on the light source itself. The same measurement answers a separate
+question: whether the attenuated non-matching photosites carry enough signal to be worth
+using in reconstruction, or are too far down to bother with.
 
 **EXIF embedding is unverified but non-fatal.** Whether pyexiv2 writes the preserved
 EXIF cleanly into the tifffile-produced TIFF — and whether the `Exif.Sony2.*`

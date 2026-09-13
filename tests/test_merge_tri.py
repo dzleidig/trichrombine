@@ -49,7 +49,8 @@ def patched(monkeypatch):
 
 def _merge(tmp_path, meta=None):
     out = tmp_path / 'frame.tiff'
-    peaks = merge_tri.merge_triplet('R', 'G', 'B', None, out, meta or {'roll_id': 'r1'})
+    peaks = merge_tri.merge_triplet('R', 'G', 'B', None, out, meta or {'roll_id': 'r1'},
+                                    full_resolution=False)
     return out, peaks
 
 
@@ -94,7 +95,7 @@ def test_flat_field_division_is_applied(patched, tmp_path):
     """Halving the flat should double the recovered signal."""
     half = {ch: np.full((SIZE // 2, SIZE // 2), 0.5, dtype=np.float32) for ch in 'RGB'}
     out = tmp_path / 'flat.tiff'
-    peaks = merge_tri.merge_triplet('R', 'G', 'B', half, out, {'roll_id': 'r1'})
+    peaks = merge_tri.merge_triplet('R', 'G', 'B', half, out, {'roll_id': 'r1'}, full_resolution=False)
     assert peaks['R'] == pytest.approx(2 * 8000 / (WHITE - BLACK[0]), rel=1e-3)
 
 
@@ -126,11 +127,35 @@ def test_writes_json_sidecar_next_to_the_tiff(patched, tmp_path):
 def test_clips_rather_than_wrapping_on_overflow(monkeypatch, tmp_path):
     """A flat-field division can push values past full scale; uint16 wraparound
     would turn highlights black."""
-    raws = {ch: _raw(16000, 16000, 16000) for ch in 'RGB'}
+    # One channel hot per exposure, as a narrowband triplet actually looks; lighting
+    # all three at once is a frame the channel check rightly refuses.
+    raws = {'R': _raw(16000, 100, 100), 'G': _raw(100, 16000, 100), 'B': _raw(100, 100, 16000)}
     monkeypatch.setattr(merge_tri, 'read_raw', lambda path: raws[str(path)])
     monkeypatch.setattr(merge_tri, '_preserve_exif', lambda src, dst: None)
 
     import tifffile
     out = tmp_path / 'clip.tiff'
-    merge_tri.merge_triplet('R', 'G', 'B', None, out, {'roll_id': 'r1'})
+    merge_tri.merge_triplet('R', 'G', 'B', None, out, {'roll_id': 'r1'}, full_resolution=False)
     assert tifffile.imread(str(out)).max() == 65535
+
+
+def test_merge_refuses_a_mis_attributed_triplet(monkeypatch, tmp_path):
+    """End-to-end: hand merge_triplet the green exposure as its red one. Without the
+    check this writes a valid TIFF with red and green exchanged and reports success."""
+    swapped = {'R': _raw(100, 9000, 100), 'G': _raw(8000, 100, 100), 'B': _raw(100, 100, 7000)}
+    monkeypatch.setattr(merge_tri, 'read_raw', lambda path: swapped[str(path)])
+    monkeypatch.setattr(merge_tri, '_preserve_exif', lambda src, dst: None)
+
+    out = tmp_path / 'swapped.tiff'
+    with pytest.raises(ValueError, match="mis-attributed"):
+        merge_tri.merge_triplet('R', 'G', 'B', None, out, {'roll_id': 'r1'}, full_resolution=False)
+    assert not out.exists(), "a refused frame must not leave a file behind"
+
+
+def test_sidecar_records_the_channel_dominance(patched, tmp_path):
+    """Headroom on the check is worth keeping: a ratio drifting toward 1 across a roll
+    means the light is going wrong."""
+    out, _ = _merge(tmp_path)
+    record = json.loads(out.with_suffix('.json').read_text())
+    assert set(record['channel_dominance']) == {'R', 'G', 'B'}
+    assert record['channel_dominance']['R'] > 1.0
