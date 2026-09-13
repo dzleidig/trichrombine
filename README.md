@@ -9,6 +9,7 @@ time.
 - [Hardware](#hardware)
 - [Installation](#installation)
 - [Workflow](#workflow)
+- [Options](#options)
 - [Development](#development)
 - [License](#license)
 
@@ -170,6 +171,52 @@ DCP or camera color matrix — the file stays in sensor space, tagged with a lin
 ProPhoto-primaries ICC profile, and color characterization happens downstream in
 Capture One on the merged TIFF. Inversion happens in Capture One's Levels while
 the data is still linear; gamma encoding happens on export.
+
+## Options
+
+`--watch-dir` is always required, and you need one of `--session-dir` or `--resume`.
+Everything else has a working default — `trichrom-scan --help` prints the same list.
+
+### Session and output
+
+| Flag | Default | What it's for |
+|---|---|---|
+| `--watch-dir DIR` | **required** | Capture One's capture folder, where the ARWs land. Watched to pair each trigger with its file. |
+| `--session-dir DIR` | — | Folder holding `session.json` and the flats. Required unless `--resume`. A path that doesn't exist yet starts a new session, which is what triggers calibration. |
+| `--resume` | off | Reuse the most recently used session instead of naming one. |
+| `--output-dir DIR` | `--watch-dir` | Where merged TIFFs and their sidecars are written. |
+| `--film-stock NAME` | empty | Recorded in `session.json` and in every sidecar. |
+| `--roll-id ID` | empty | Recorded as above, and used in output filenames — `<roll-id>_0001.tiff`, or `roll_0001.tiff` if unset. |
+| `--date DATE` | today | Session date, recorded in state. |
+| `--port PORT` | auto-detect | Scanlight serial port. Pass it if detection picks the wrong device. |
+| `--camera-backend NAME` | `captureone` | `captureone` or `gphoto2`. See [Hardware](#hardware) for why the default is what it is. |
+| `--recalibrate` | off | Force calibration even on a session that already has it. |
+| `--dry-run` | off | Walk the entire flow printing what it would do, touching no hardware. |
+
+### Calibration tuning
+
+Defaults are usually fine.
+
+| Flag | Default | What it's for |
+|---|---|---|
+| `--start-power N` | `200` | LED power (0-255) for the warm-up cycle and the channel-balance pass. Balance only scales channels *down* from here, so it acts as the ceiling. |
+| `--flat-brightness N` | `180` | Starting power for the flat-field probe; the probe then scales it per channel to hit the target exposure. |
+| `--flat-shots N` | `6` | Exposures averaged per channel when building each flat. |
+| `--skip-flats` | off | Reuse the flats already in the session dir. |
+| `--warmup-seconds N` | `300` | How long to cycle R/G/B before calibrating. |
+| `--skip-warmup` | off | Skip the warm-up entirely. Reasonable on an already-hot light, not on a cold start. |
+| `--max-exposure-iterations N` | `4` | Cap on shutter-refinement passes. Shutter steps are discrete, so it accepts the closest value if it hasn't converged by then. |
+
+### Capture timing
+
+Defaults are usually fine.
+
+| Flag | Default | What it's for |
+|---|---|---|
+| `--stabilize N` | `0.15` | Seconds between setting the LED and firing — LED settle plus copy-stand vibration. Raise it if the stand rings. |
+| `--capture-wait N` | `8.0` | Max seconds to wait for an ARW to appear in `--watch-dir`. Raise it for slow cards or large files. |
+| `--shutter-timeout-ms N` | `8000` | Max milliseconds waiting for capture confirmation. `gphoto2` backend only — the Capture One trigger is asynchronous, so the file landing is the signal that matters. |
+| `--preview-brightness N` | `32` | White-equivalent (R=G=B) level between frames, so you can see the film while advancing it. |
 
 ## Development
 
