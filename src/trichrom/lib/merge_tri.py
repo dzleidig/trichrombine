@@ -21,7 +21,7 @@ import tifffile
 from .flatfield import apply_flat
 from .icc import build_linear_prophoto_icc
 from .rawio import (INTERPOLATION_ORDER, active_site_offsets, crop_half_res,
-                    extract_bayer_channel, read_raw, upsample_bayer_plane)
+                    extract_bayer_channel, read_raw, upsample_bayer_plane, verify_channel)
 from .scanner import CHANNEL_BAYER_INDICES
 
 _ICC_PROFILE = None
@@ -108,6 +108,13 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
         'B': read_raw(blue_path),
     }
 
+    # Read back which LED actually lit each frame before trusting the filenames. This
+    # is the one point where all three come together, and the raws are already open, so
+    # it costs nothing. run_capture_loop catches the raise, records the frame as failed
+    # and names it for redoing, rather than writing a plausible file with swapped
+    # channels that would only surface part-way through inverting a roll.
+    dominance = {ch: verify_channel(raws[ch], ch, CHANNEL_BAYER_INDICES) for ch in 'RGB'}
+
     fields = {ch: _channel_field(raws[ch], ch, flats[ch] if flats else None, full_resolution)
               for ch in 'RGB'}
     planes = {ch: field for ch, (field, _) in fields.items()}
@@ -130,6 +137,10 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
     tiff_meta = dict(meta)
     tiff_meta['peaks'] = peaks
     tiff_meta['output_resolution'] = 'full' if full_resolution else 'half'
+    # Recorded so a later reader can see the channel check ran and how much headroom it
+    # had — a ratio drifting toward 1 over a roll means the light is going wrong.
+    tiff_meta['channel_dominance'] = {ch: round(v, 1) if v != float('inf') else None
+                                      for ch, v in dominance.items()}
     # Whether these pixels were measured or reconstructed is provenance, not trivia:
     # it decides what the file can honestly be compared against later.
     tiff_meta['interpolation'] = (

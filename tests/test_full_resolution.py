@@ -69,6 +69,31 @@ def _curved():
     return (2000.0 + 1500.0 * np.sin(y / 7.0) * np.cos(x / 5.0)).astype(np.float32)
 
 
+def _triplet_raws(lit=6000.0, dark=60.0):
+    """Three exposures as a real narrowband triplet looks: in each, only that channel's
+    photosites carry signal.
+
+    The uniform-field fixtures above deliberately light every site equally, which is
+    what makes them useful for checking reconstruction — but it is not a frame the
+    channel check would ever accept, so anything going through `merge_triplet` needs
+    this instead.
+    """
+    def one(ch):
+        image = np.zeros((FULL_H, FULL_W), dtype=np.float32)
+        for name, sites in SITES.items():
+            for idx, r, c in sites:
+                image[r::2, c::2] = BLACK[idx] + (lit if name == ch else dark)
+        return {
+            'pattern': PATTERN,
+            'image': image,
+            'sizes': SIZES,
+            'black_level_per_channel': BLACK,
+            'white_level': WHITE,
+            'camera_whitebalance': [1.0, 1.0, 1.0, 0.0],
+        }
+    return {ch: one(ch) for ch in 'RGB'}
+
+
 def _fields(raw, full_resolution=True):
     """_channel_field returns (plane, measured peak); these tests are about the plane."""
     return {ch: merge_tri._channel_field(raw, ch, None, full_resolution)[0] for ch in 'RGB'}
@@ -132,8 +157,8 @@ def test_uniform_field_stays_uniform():
 def test_full_resolution_merge_writes_a_full_size_tiff(monkeypatch, tmp_path):
     import tifffile
 
-    raw = _raw_from_field(_ramp())
-    monkeypatch.setattr(merge_tri, 'read_raw', lambda path: raw)
+    raws = _triplet_raws()
+    monkeypatch.setattr(merge_tri, 'read_raw', lambda path: raws[str(path)])
     monkeypatch.setattr(merge_tri, '_preserve_exif', lambda src, dst: None)
 
     out = tmp_path / 'full.tiff'
@@ -145,8 +170,8 @@ def test_sidecar_records_whether_pixels_were_measured_or_inferred(monkeypatch, t
     """Provenance: a full-resolution file must not be mistakable for a measured one."""
     import json
 
-    raw = _raw_from_field(_ramp())
-    monkeypatch.setattr(merge_tri, 'read_raw', lambda path: raw)
+    raws = _triplet_raws()
+    monkeypatch.setattr(merge_tri, 'read_raw', lambda path: raws[str(path)])
     monkeypatch.setattr(merge_tri, '_preserve_exif', lambda src, dst: None)
 
     for full, expected in ((True, 'full'), (False, 'half')):

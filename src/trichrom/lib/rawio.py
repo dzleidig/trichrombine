@@ -86,6 +86,72 @@ def extract_led_channel_plane(image, pattern, channel_indices, black_per_channel
     return np.mean(planes, axis=0)
 
 
+# How far the strongest Bayer colour must stand above the next for a frame to count as
+# narrowband-lit. The true ratio is set by the CFA's transmission at the LED wavelengths
+# and should be far higher than this — but nobody has measured it for this body, so the
+# threshold stays conservative. Its real job is separating one-LED light from the
+# white-equivalent preview level, where the ratio sits at about 1.
+MIN_DOMINANCE = 2.0
+
+
+def channel_means(image, pattern, black_levels, channel_indices, stride=8):
+    """Mean black-subtracted signal per LED channel, subsampled.
+
+    Subsampled because this answers an identity question, not a measurement one: full
+    means over four 15MP planes cost about a quarter of a second per frame and a
+    quarter-million samples settle the same argmax in a millisecond.
+    """
+    return {
+        ch: float(np.mean([
+            extract_bayer_channel(image, pattern, idx)[0][::stride, ::stride].mean()
+            - black_levels[idx]
+            for idx in indices
+        ]))
+        for ch, indices in channel_indices.items()
+    }
+
+
+def verify_channel(raw, expected, channel_indices):
+    """
+    Confirm from the pixels that this frame really was lit by the LED we think it was.
+
+    Everything downstream keys off filename-to-channel attribution, and that attribution
+    rests on `wait_for_new_file()` having returned the right file for each trigger —
+    which `wait_for_settle()` makes likely but cannot guarantee. A swap there produces a
+    perfectly valid TIFF with two channels exchanged and raises nothing at all, so it is
+    worth reading back what the data says instead of trusting the sequence.
+
+    Under a single narrowband LED one Bayer colour stands far above the others, so the
+    argmax is unambiguous and needs no calibration to interpret.
+
+    Returns the dominance ratio; raises ValueError if the frame fails.
+    """
+    means = channel_means(raw['image'], raw['pattern'],
+                          raw['black_level_per_channel'], channel_indices)
+    ranked = sorted(means.values(), reverse=True)
+    summary = ', '.join(f'{ch}={means[ch]:.0f}' for ch in sorted(means))
+
+    if ranked[0] <= 0:
+        raise ValueError(f"frame is black ({summary}) — did the LED fire?")
+
+    dominance = ranked[0] / ranked[1] if ranked[1] > 0 else float('inf')
+
+    # Checked before identity: when no colour dominates, the argmax is meaningless and
+    # naming one would only mislead. This is the case for a frame caught under the
+    # white-equivalent preview light rather than a single LED.
+    if dominance < MIN_DOMINANCE:
+        raise ValueError(
+            f"frame is not narrowband-lit: no channel dominates ({summary}, "
+            f"ratio {dominance:.2f} < {MIN_DOMINANCE}). Shot under preview light?")
+
+    got = max(means, key=means.get)
+    if got != expected:
+        raise ValueError(
+            f"frame expected to be the {expected} exposure reads as {got} "
+            f"({summary}) — channels are mis-attributed, not merely mis-exposed")
+    return dominance
+
+
 def active_site_offsets(row_offset, col_offset, sizes):
     """
     Where a sub-plane's samples sit relative to the active area's top-left corner.

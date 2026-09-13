@@ -330,6 +330,26 @@ incidental, each found by a test that failed first:
   ~35% of total merge time. Prefer in-place `np.multiply(..., out=)` and `+=` anywhere
   in this path; the readable version is not free here the way it usually is.
 
+`verify_channel()` in the same module answers a question nothing else in the pipeline
+asks: was this frame really lit by the LED we think it was? Everything downstream keys
+off filename-to-channel attribution, and that rests on `wait_for_new_file()` returning
+the right file per trigger. Get it wrong and the merge writes a valid, sharp,
+correctly-exposed TIFF with two channels exchanged, raising nothing — you find out
+part-way through inverting a roll. Under one narrowband LED a single Bayer colour
+stands far above the others, so the argmax settles it with no calibration needed.
+
+It runs in two places, following the `_shoot`/`_require_shot` convention: inside
+`merge_triplet()`, where the raws are already open so it costs nothing and a raise
+becomes one failed frame; and via `_read_verified()` on the calibration path, where it
+is fatal, because a mis-attributed calibration frame does not spoil one image, it
+quietly mis-exposes the whole roll. Order of checks matters — black, then dominance,
+then identity: at low signal or under white light the argmax is decided by noise, so
+naming a channel would mislead rather than inform. `MIN_DOMINANCE` is deliberately
+conservative at 2.0; the true CFA ratio is far higher but has never been measured on
+this body, and the threshold's real job is separating one-LED light from the
+white-equivalent preview level, which sits near 1. The measured ratio goes into the
+sidecar, so a roll drifting toward 1 is visible after the fact.
+
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
 pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,
 3=G2 (second green in RGGB); black/white levels and active sensor area margins are
@@ -347,6 +367,9 @@ attribution correct.
 a timeout means the file is most likely still being written, which is the exact case
 the guard exists to catch. `_shoot()` therefore discards the path and returns `None`;
 losing one frame beats merging a truncated raw.
+
+That settle makes correct attribution *likely*; it cannot guarantee it, which is why
+`verify_channel()` reads it back from the pixels — see below.
 
 ## Open items
 

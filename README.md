@@ -163,6 +163,12 @@ whether to redo it rather than it being silently trusted — LED drift or a phys
 bump can make old numbers stale. Each merged TIFF gets a JSON sidecar with
 calibration numbers, shutter speed, raw peaks, and source filenames.
 
+Before merging, each frame is checked against the pixels to confirm it really was lit
+by the LED its filename implies — a swap would otherwise produce a perfectly valid TIFF
+with two channels exchanged and no error anywhere. A frame that fails is skipped and
+named for redoing; during calibration it aborts instead, since a mis-attributed
+calibration frame mis-exposes the entire roll rather than one image.
+
 Only the matching CFA plane is read from each exposure (red from the red-lit shot,
 etc. — green averages the two green photosite positions), normalized by
 `white_level - black_level`, divided by that channel's flat field, and stacked
