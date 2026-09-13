@@ -109,16 +109,11 @@ Synthetic raw frames in tests should use **nonzero** sensor margins, so that an
 active-area crop mismatch cannot hide — that class of bug passes on a zero-margin
 fixture and breaks at the rig.
 
-Note though that the A7R V reports `top_margin=0, left_margin=0`, which is *not* what
-the fixtures assume. Its real geometry is `raw 6656x9728, height 6374, width 9566,
-crop_top_margin 20, crop_left_margin 32, crop_width 9504, crop_height 6336`. So the
-border rawpy expects you to trim lives in the `crop_*` fields, and the pipeline — which
-crops by `top_margin`/`left_margin` + `height`/`width` — keeps a 20-row, 32-column strip
-that Sony considers outside the frame. Self-consistent, since the flats are cropped the
-same way, and it only costs ~0.6% of border; but it means output is 6374x9566 rather
-than the 6336x9504 you would get from any other converter. Worth deciding deliberately
-rather than by accident. Both `crop_*` margins are even, so the Bayer phase survives
-either choice.
+Note though that the A7R V reports `top_margin=0, left_margin=0` — the margin that
+matters is in the `crop_*` fields, not where you would look first. Its real geometry is
+`raw 6656x9728, height 6374, width 9566, crop_top_margin 20, crop_left_margin 32,
+crop_width 9504, crop_height 6336`. `active_area()` in `lib/rawio.py` is the single place
+that resolves this; nothing else should read the margins directly.
 
 When adding tests, check they actually catch a regression — break the thing on purpose
 and confirm the relevant test fails.
@@ -325,7 +320,17 @@ pointer file (`~/.trichrom/last_session`) records the most recently used session
 dir for `--resume`; losing it costs convenience. Per-frame status is recorded so a
 mid-roll merge failure identifies exactly which frames need redoing.
 
-**`lib/rawio.py`** — rawpy read plus the Bayer plane helpers. `upsample_bayer_plane()`
+**`lib/rawio.py`** — rawpy read plus the Bayer plane helpers. `active_area()` decides
+what counts as the image: the camera's inset crop when the file carries one, otherwise
+the visible area. LibRaw parses that crop from maker metadata but never applies it —
+`postprocess()` returns the larger visible area — so cropping by `top_margin` +
+`height`/`width`, as this did until the first real roll, keeps a border strip every other
+converter trims. On the A7R V that is 20 rows and 32 columns: 6374x9566 emitted where the
+camera intends 6336x9504. The crop is relative to the *raw* image, the same basis as
+`top_margin`, and LibRaw guarantees `ctop + cheight <= raw_height`; values breaking that
+bound, carrying the `0xffff` sentinel, or missing entirely on an older rawpy fall back to
+the visible area. `active_site_offsets()` takes the Bayer phase from whichever origin won,
+since an odd inset margin would otherwise misregister the channels silently. `upsample_bayer_plane()`
 carries the full-resolution path, and three things in it are load-bearing rather than
 incidental, each found by a test that failed first:
 

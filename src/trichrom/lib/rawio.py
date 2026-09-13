@@ -57,11 +57,45 @@ def read_raw(path):
         }
 
 
+# LibRaw's "this file carries no inset crop" sentinel.
+CROP_UNSET = 0xFFFF
+
+
+def active_area(sizes):
+    """
+    Origin and size of the image area, in raw-image coordinates.
+
+    Prefers the camera's own inset crop when the file carries one. LibRaw parses that
+    from the maker metadata but does not apply it — `postprocess()` hands back the
+    larger visible area — so without this the output keeps a border strip that every
+    other converter trims. On the A7R V that is a 20-row, 32-column edge, and the
+    difference between emitting 6374x9566 and the 6336x9504 the camera intends.
+
+    The inset crop is specified relative to the raw image, the same basis as
+    `top_margin`, and LibRaw guarantees `ctop + cheight <= raw_height` — so a set of
+    values failing that bound is not trustworthy and the visible area is used instead.
+    `getattr` because older rawpy builds predate these fields entirely.
+    """
+    crop = (getattr(sizes, 'crop_top_margin', CROP_UNSET),
+            getattr(sizes, 'crop_left_margin', CROP_UNSET),
+            getattr(sizes, 'crop_height', CROP_UNSET),
+            getattr(sizes, 'crop_width', CROP_UNSET))
+    top, left, height, width = crop
+    usable = (
+        CROP_UNSET not in crop
+        and height > 0 and width > 0
+        and top + height <= sizes.raw_height
+        and left + width <= sizes.raw_width
+    )
+    if usable:
+        return top, left, height, width
+    return sizes.top_margin, sizes.left_margin, sizes.height, sizes.width
+
+
 def crop_half_res(plane, sizes):
     """Crop a half-resolution Bayer-channel plane to the active sensor area."""
-    top, left = sizes.top_margin // 2, sizes.left_margin // 2
-    h, w = sizes.height // 2, sizes.width // 2
-    return plane[top:top + h, left:left + w]
+    top, left, height, width = active_area(sizes)
+    return plane[top // 2:top // 2 + height // 2, left // 2:left // 2 + width // 2]
 
 
 def extract_bayer_channel(raw_image, bayer_pattern, channel_index):
@@ -161,8 +195,14 @@ def active_site_offsets(row_offset, col_offset, sizes):
     photosite. Folding `margin % 2` into the offset makes the mapping correct for
     either parity instead of silently misregistering the channels on a body whose
     margins aren't even.
+
+    Reads the margin from `active_area()` so it follows whichever origin the crop
+    actually used. The A7R V's inset margins happen to be even, but nothing guarantees
+    that on another body, and a phase computed against the wrong origin would shift the
+    channels against each other with no error anywhere.
     """
-    return row_offset - (sizes.top_margin % 2), col_offset - (sizes.left_margin % 2)
+    top, left, _, _ = active_area(sizes)
+    return row_offset - (top % 2), col_offset - (left % 2)
 
 
 def upsample_bayer_plane(plane, row_offset, col_offset, out_shape, order=INTERPOLATION_ORDER):
