@@ -9,6 +9,8 @@ correctly-exposed TIFF with two channels exchanged — nothing raises, and you f
 part-way through inverting a roll.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -20,6 +22,10 @@ WHITE = 16383
 SIZE = 64
 PATTERN = np.array([[0, 1], [3, 2]], dtype=np.uint8)  # RGGB
 SITES = {'R': [(0, 0, 0)], 'G': [(1, 0, 1), (3, 1, 0)], 'B': [(2, 1, 1)]}
+# Nonzero margins, as a real body has — the check measures the active area, not the
+# whole raw, so that the numbers it reports match what the pipeline actually works on.
+SIZES = SimpleNamespace(raw_height=SIZE, raw_width=SIZE, height=56, width=52,
+                        top_margin=4, left_margin=6)
 
 
 def _raw(levels):
@@ -28,7 +34,7 @@ def _raw(levels):
     for ch, sites in SITES.items():
         for idx, r, c in sites:
             image[r::2, c::2] = BLACK[idx] + levels[ch]
-    return {'pattern': PATTERN, 'image': image,
+    return {'pattern': PATTERN, 'image': image, 'sizes': SIZES,
             'black_level_per_channel': BLACK, 'white_level': WHITE}
 
 
@@ -58,7 +64,7 @@ def test_green_is_read_from_both_green_photosites():
     image[0::2, 1::2] = BLACK[1] + 100.0    # G  low
     image[1::2, 0::2] = BLACK[3] + 8000.0   # G2 high  -> true green mean 4050
     image[1::2, 1::2] = BLACK[2] + 100.0    # B
-    raw = {'pattern': PATTERN, 'image': image,
+    raw = {'pattern': PATTERN, 'image': image, 'sizes': SIZES,
            'black_level_per_channel': BLACK, 'white_level': WHITE}
 
     means = channel_means(image, PATTERN, BLACK, CHANNEL_BAYER_INDICES)
@@ -109,3 +115,66 @@ def test_subsampling_does_not_change_the_verdict():
     full = channel_means(raw['image'], PATTERN, BLACK, CHANNEL_BAYER_INDICES, stride=1)
     cheap = channel_means(raw['image'], PATTERN, BLACK, CHANNEL_BAYER_INDICES, stride=8)
     assert max(full, key=full.get) == max(cheap, key=cheap.get) == 'G'
+
+
+# Channel means measured on the real rig (A7R V + Big ScanLight, active area, stride 8),
+# one narrowband LED at a time. These are what the check has to cope with.
+RIG_RED = {'R': 3061.0, 'G': 465.0, 'B': 111.0}      # max/min 27.6, max/2nd 6.6
+RIG_GREEN = {'R': 974.0, 'G': 11328.0, 'B': 2310.0}  # max/min 11.6, max/2nd 4.9
+RIG_BLUE = {'R': 1162.0, 'G': 11773.0, 'B': 15870.0}  # max/min 13.7, max/2nd *1.35*
+# All three LEDs together, summed from the same measurements and scaled to the drive
+# preview light actually uses (32 of the 180 those were measured at) so the frame does
+# not clip. max/min 5.65, max/2nd 1.69 — i.e. by max/2nd, white scores *better* than
+# real narrowband blue, which is why that statistic cannot do this job.
+_PREVIEW = 32 / 180
+RIG_WHITE = {c: v * _PREVIEW for c, v in {'R': 6171.0, 'G': 34894.0, 'B': 20601.0}.items()}
+
+
+def test_accepts_real_narrowband_blue():
+    """The regression. Blue is the hard case on any Bayer CFA: the green filter passes
+    a lot of blue, so green sits right behind blue and max/2nd is only 1.35. A run
+    aborted here on a perfectly good frame."""
+    assert verify_channel(_raw(RIG_BLUE), 'B', CHANNEL_BAYER_INDICES)
+
+
+def test_accepts_real_narrowband_red_and_green():
+    assert verify_channel(_raw(RIG_RED), 'R', CHANNEL_BAYER_INDICES)
+    assert verify_channel(_raw(RIG_GREEN), 'G', CHANNEL_BAYER_INDICES)
+
+
+def test_still_rejects_real_preview_light():
+    """Loosening for blue must not blind the check to the case it exists for."""
+    with pytest.raises(ValueError, match="not narrowband-lit"):
+        verify_channel(_raw(RIG_WHITE), 'G', CHANNEL_BAYER_INDICES)
+
+
+def test_real_blue_outranks_white_on_the_statistic_used():
+    """States the property the threshold depends on: every real narrowband frame must
+    sit above white light on whatever statistic is chosen. max/2nd fails this for blue
+    (1.35 against 1.69) — max/min does not."""
+    def span(m):
+        r = sorted(m.values(), reverse=True)
+        return r[0] / r[-1]
+    assert min(span(RIG_RED), span(RIG_GREEN), span(RIG_BLUE)) > span(RIG_WHITE)
+
+
+def test_a_saturated_frame_is_exempt_from_the_dominance_check():
+    """Clipping pins the dominant channel while the others keep climbing, so the ratio
+    is only a lower bound — a failing one proves nothing. The blue probe that aborted
+    the run was 100% clipped."""
+    saturated = _raw({'R': 3000.0, 'G': 11773.0, 'B': float(WHITE - BLACK[2])})
+    assert verify_channel(saturated, 'B', CHANNEL_BAYER_INDICES)
+
+
+def test_the_same_ratio_is_rejected_when_not_saturated():
+    """The exemption must be about saturation, not about being lenient."""
+    scaled = _raw({'R': 1900.0, 'G': 7400.0, 'B': 10000.0})   # same ~5.3 span, unclipped
+    with pytest.raises(ValueError, match="not narrowband-lit"):
+        verify_channel(scaled, 'B', CHANNEL_BAYER_INDICES)
+
+
+def test_a_saturated_frame_is_still_checked_for_identity():
+    """Exempt from dominance is not exempt from being the right channel."""
+    saturated = _raw({'R': 3000.0, 'G': 11773.0, 'B': float(WHITE - BLACK[2])})
+    with pytest.raises(ValueError, match="reads as B"):
+        verify_channel(saturated, 'G', CHANNEL_BAYER_INDICES)

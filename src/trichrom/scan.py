@@ -33,17 +33,19 @@ it explicitly to write merged TIFFs somewhere else.
 """
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
-from .lib import captureone, gphoto, session_state
-from .lib.flatfield import FLAT_TARGET, build_channel_flat, flat_level
+from .lib import captureone, gphoto, session_state, sessionlog
+from .lib.flatfield import FLAT_MAX, FLAT_TARGET, build_channel_flat, flat_level
 from .lib.leader import measure_leader_level
 from .lib.merge_tri import merge_triplet
-from .lib.rawio import crop_half_res, extract_led_channel_plane, read_raw, verify_channel
+from .lib.rawio import (active_area, crop_half_res, extract_led_channel_plane, read_raw,
+                        verify_channel)
 from .lib.scanner import CHANNEL_BAYER_INDICES, Scanlight, find_scanlight_port, wait_for_new_file
 from .lib.shutter import nearest_shutter_choice, shutter_str_to_seconds
 
@@ -55,7 +57,12 @@ SETTLE_SECONDS = 1.0
 # How long each channel holds during warm-up. Roughly one capture's dwell, so the
 # board sees the same on/off rhythm it will during the roll.
 WARMUP_DWELL_SECONDS = 3.0
+# How many times the flat probe may back off before giving up. Each attempt halves LED
+# power, so four covers a 16x overshoot — well past anything the rig has shown.
+MAX_FLAT_PROBES = 4
 CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
+
+log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -140,6 +147,19 @@ def _require_shot(scanlight, camera, args, ch, level, what):
     return path
 
 
+_geometry_recorded = False
+
+
+def _record_geometry_once(raw):
+    """Which rectangle the pipeline settled on, logged from the first raw it reads.
+    The A7R V reports top_margin=0 and keeps its real border in crop_top_margin, so
+    this is not something to infer after the fact."""
+    global _geometry_recorded
+    if not _geometry_recorded:
+        sessionlog.record_geometry(raw['sizes'], active_area(raw['sizes']))
+        _geometry_recorded = True
+
+
 def _read_verified(path, ch, what):
     """read_raw for the calibration path, refusing a frame that wasn't lit by the LED
     we think it was.
@@ -148,9 +168,11 @@ def _read_verified(path, ch, what):
     balance and shutter speed for the whole roll, so a mis-attributed frame doesn't
     spoil one image, it quietly mis-exposes every one that follows."""
     raw = read_raw(path)
+    _record_geometry_once(raw)
     try:
         verify_channel(raw, ch, CHANNEL_BAYER_INDICES)
     except ValueError as exc:
+        log.error('calibration aborted on the %s frame for channel %s: %s', what, ch, exc)
         sys.exit(f"Calibration aborted on the {what} frame for channel {ch}: {exc}")
     return raw
 
@@ -171,29 +193,83 @@ def _measure_channel_level(path, ch, flats):
 
 def _probe_flat_power(scanlight, camera, args, ch):
     """
-    Shoot one bare-light probe and scale LED power so the flat lands near
-    FLAT_TARGET of usable range.
+    Probe with bare light and pick the LED power that lands the flat near FLAT_TARGET
+    of usable range. Returns (power, led_at_max) — the second half says the ratio wanted
+    more than the 255 maximum and was clamped, which is what decides whether "turn the
+    light up" is still advice the operator can act on.
 
-    Flats are captured before the exposure pass has set a shutter speed — they
-    have to be, since the leader readings that drive that pass are themselves
-    flat-corrected. So LED power is the lever here, not shutter. Direct ratio,
-    no search loop: LED output is roughly linear with drive current.
+    Flats are captured before the exposure pass has set a shutter speed — they have to
+    be, since the leader readings that drive that pass are themselves flat-corrected. So
+    LED power is the lever here, not shutter, and LED output is roughly linear with
+    drive current, which makes the correction a direct ratio rather than a search.
+
+    The loop exists only because that ratio needs an *unclipped* reading to be worth
+    anything. A saturated frame reports 100% of usable range however far past full scale
+    it truly is, so scaling from it always under-corrects — the first green probe on real
+    hardware came back 99.9% clipped at power 180, reported 100%, and yielded power 126
+    when ~92 was needed. Backing off and looking again costs one frame and is the only
+    way to recover the real number.
     """
-    path = _require_shot(scanlight, camera, args, ch, args.flat_brightness, 'flat-field probe')
+    power = args.flat_brightness
+    for attempt in range(1, MAX_FLAT_PROBES + 1):
+        path = _require_shot(scanlight, camera, args, ch, power, 'flat-field probe')
+        if args.dry_run:
+            return power, False
+
+        raw = _read_verified(path, ch, 'flat-field probe')
+        level = flat_level(raw['image'], raw['pattern'], CHANNEL_BAYER_INDICES[ch],
+                           raw['black_level_per_channel'], raw['sizes'], raw['white_level'])
+        if level <= 0:
+            sys.exit(f"Flat probe for channel {ch} came back black — check the LED "
+                     f"and that the film holder is off.")
+
+        if level < FLAT_MAX:
+            break
+
+        # At or above the level a finished flat would be rejected at, the reading is
+        # pinned near full scale and its ratio cannot be trusted. Halve rather than
+        # scale by it: the true level may be any multiple of what was reported.
+        if power <= 1:
+            sys.exit(f"Flat probe for channel {ch} is saturated even at minimum LED "
+                     f"power. Stop down the aperture or shorten the shutter.")
+        log.info('%s flat probe: power %d read %.1f%% - saturated, halving', ch, power, level * 100)
+        print(f"  [{ch}] probe at power {power} reads {level:.0%} — saturated, "
+              f"halving to {max(1, power // 2)} and re-probing")
+        power = max(1, power // 2)
+    else:
+        sys.exit(f"Flat probe for channel {ch} still saturated after {MAX_FLAT_PROBES} "
+                 f"attempts. Stop down the aperture or shorten the shutter.")
+
+    wanted = round(power * FLAT_TARGET / level)
+    chosen = max(1, min(255, wanted))
+    log.info('%s flat probe: power %d read %.1f%% -> power %d (wanted %d, clamped=%s)',
+             ch, power, level * 100, chosen, wanted, wanted > 255)
+    print(f"  [{ch}] probe at power {power} read {level:.0%} of usable "
+          f"range -> shooting flats at power {chosen}")
+    if wanted > 255:
+        # The LED is already at maximum and the channel is still short of target. The
+        # flat is usable as long as build_channel_flat accepts it, but say so, because
+        # the operator's only remaining levers are aperture and shutter.
+        print(f"  [{ch}] NOTE: hitting {FLAT_TARGET:.0%} would need power {wanted}, above "
+              f"the 255 maximum. The flat will land near {level * 255 / power:.0%} of "
+              f"usable range — legal but dim. Open up or slow the shutter (--flat-shutter) "
+              f"to do better.")
+    return chosen, wanted > 255
+
+
+def _flat_shutter_speed(args, camera):
+    """The shutter the flats are actually being shot at, for the session record.
+
+    Best effort on purpose: this is provenance, so a backend that won't report it
+    costs a line in session.json, never the roll.
+    """
     if args.dry_run:
-        return args.flat_brightness
-
-    raw = _read_verified(path, ch, 'flat-field probe')
-    level = flat_level(raw['image'], raw['pattern'], CHANNEL_BAYER_INDICES[ch],
-                       raw['black_level_per_channel'], raw['sizes'], raw['white_level'])
-    if level <= 0:
-        sys.exit(f"Flat probe for channel {ch} came back black — check the LED "
-                 f"and that the film holder is off.")
-
-    power = max(1, min(255, round(args.flat_brightness * FLAT_TARGET / level)))
-    print(f"  [{ch}] probe at power {args.flat_brightness} read {level:.0%} of usable "
-          f"range -> shooting flats at power {power}")
-    return power
+        return None
+    try:
+        return args.cam.get_shutter_speed(camera)
+    except Exception as e:
+        print(f"  NOTE: could not read the shutter speed for the flats' record ({e}).")
+        return None
 
 
 def capture_flats(scanlight, camera, args, session_dir):
@@ -204,15 +280,37 @@ def capture_flats(scanlight, camera, args, session_dir):
     Exposure is set per channel from a probe frame rather than assumed: a clipped
     flat under-corrects falloff across the whole roll and a dark one divides its
     read noise into every frame, and neither announces itself in the output.
+
+    The shutter is left wherever the camera has it unless --flat-shutter says
+    otherwise, and that is not a compromise: a flat is peak-normalized, so only its
+    *shape* is ever applied, and shape is illumination falloff times lens vignetting —
+    neither depends on shutter speed. The flats' shutter is therefore free to differ
+    from the one the exposure pass later settles on. What it does decide is how well
+    exposed the flat is, which is why --flat-shutter exists at all: when the LED clamps
+    at 255 and the flat still comes back dim (red needs ~595 on the real rig), a slower
+    shutter is the lever that remains. Returns (flat_paths, shutter_speed).
     """
     print("=== Flat fields ===")
-    print("Remove the film holder — bare light only — before continuing.\n")
+    if args.flat_shutter:
+        print(f"Setting shutter speed to {args.flat_shutter} for the flat pass.")
+        args.cam.set_shutter_speed(camera, args.flat_shutter, dry_run=args.dry_run)
+    # Actually wait. Said "before continuing" and then continued, so the flats were shot
+    # through the holder — baking its vignetting and edges into the correction applied to
+    # every frame of the roll, which looks like a plausible flat and is not one.
+    print("Remove the film holder — bare light only — then press Enter...")
+    if not args.dry_run:
+        input()
+    print()
     flats_dir = session_dir / 'flats'
     flats_dir.mkdir(parents=True, exist_ok=True)
 
+    shutter_speed = _flat_shutter_speed(args, camera)
+    if shutter_speed:
+        print(f"Shooting flats at shutter speed {shutter_speed}.")
+
     flat_paths = {}
     for ch in CHANNELS:
-        power = _probe_flat_power(scanlight, camera, args, ch)
+        power, led_at_max = _probe_flat_power(scanlight, camera, args, ch)
         print(f"[{ch}] Shooting {args.flat_shots} flat exposures at power {power}...")
         raws, pattern, black, sizes, white_level = [], None, None, None, None
         for _ in range(args.flat_shots):
@@ -227,13 +325,15 @@ def capture_flats(scanlight, camera, args, session_dir):
         if args.dry_run:
             continue
 
-        flat = build_channel_flat(raws, pattern, CHANNEL_BAYER_INDICES[ch], black, sizes, white_level)
+        flat = build_channel_flat(raws, pattern, CHANNEL_BAYER_INDICES[ch], black, sizes,
+                                  white_level, led_at_max=led_at_max)
         flat_path = flats_dir / f'{ch}.npy'
         np.save(flat_path, flat)
         flat_paths[ch] = flat_path
+        log.info('%s flat: %d exposures at power %d -> %s', ch, args.flat_shots, power, flat_path)
         print(f"[{ch}] Flat saved -> {flat_path}\n")
 
-    return flat_paths
+    return flat_paths, shutter_speed
 
 
 def balance_channels(scanlight, camera, args, flats):
@@ -248,6 +348,7 @@ def balance_channels(scanlight, camera, args, flats):
             continue
         level, _ = _measure_channel_level(path, ch, flats)
         levels[ch] = level
+        log.info('%s balance: leader level %.1f at power %d', ch, level, args.start_power)
         print(f"  [{ch}] leader level = {level:.1f} at power {args.start_power}")
 
     weakest = min(levels.values())
@@ -292,6 +393,8 @@ def adjust_exposure(scanlight, camera, args, powers, flats):
         reference = float(np.mean(list(peaks.values())))
         ratio = target / reference
 
+        log.info('exposure attempt %d: peaks %s | usable %.0f | target %.0f | ratio %.3f',
+                 attempt, {c: round(v, 1) for c, v in peaks.items()}, usable_range, target, ratio)
         print(f"  usable range = {usable_range:.0f}, target = {target:.0f}, "
               f"reference = {reference:.1f}, ratio = {ratio:.3f}")
 
@@ -299,9 +402,17 @@ def adjust_exposure(scanlight, camera, args, powers, flats):
             print(f"  Converged after {attempt} shutter iteration(s).\n")
             return args.cam.get_shutter_speed(camera), peaks
 
-        current = shutter_str_to_seconds(args.cam.get_shutter_speed(camera))
+        reported = args.cam.get_shutter_speed(camera)
+        current = shutter_str_to_seconds(reported)
+        if current is None or current <= 0:
+            sys.exit(f"exposure-targeting: camera reports shutter speed {reported!r}, which "
+                     "isn't a duration to scale from. Take it off Bulb and re-run calibration.")
         choices = args.cam.get_shutter_choices(camera)
         new_shutter = nearest_shutter_choice(choices, current * ratio)
+        if new_shutter is None:
+            sys.exit(f"exposure-targeting: no usable shutter speed among the {len(choices)} the "
+                     f"camera offers ({', '.join(map(str, choices[:6]))}...). Cannot target "
+                     "exposure; calibration aborted rather than scanning at the wrong one.")
         print(f"  Adjusting shutter -> {new_shutter}\n")
         args.cam.set_shutter_speed(camera, new_shutter, dry_run=args.dry_run)
 
@@ -349,8 +460,8 @@ def run_calibration(scanlight, camera, args, state, session_dir):
     if args.skip_flats and state.get('flats'):
         flat_paths = {ch: Path(p) for ch, p in state['flats'].items()}
     else:
-        flat_paths = capture_flats(scanlight, camera, args, session_dir)
-        session_state.set_flats(state, flat_paths)
+        flat_paths, flat_shutter = capture_flats(scanlight, camera, args, session_dir)
+        session_state.set_flats(state, flat_paths, flat_shutter)
         if not args.dry_run:
             session_state.save_session(session_dir, state)
 
@@ -370,6 +481,8 @@ def run_calibration(scanlight, camera, args, state, session_dir):
         print(f"  {ch}: power={powers[ch]}  peak={peaks[ch]:.1f}")
     print(f"  shutter speed: {shutter}\n")
 
+    log.info('calibration done: powers %s shutter %s peaks %s',
+             powers, shutter, {c: round(v, 1) for c, v in peaks.items()})
     session_state.set_calibration(state, powers, shutter, peaks)
     if not args.dry_run:
         session_state.save_session(session_dir, state)
@@ -445,7 +558,7 @@ def run_capture_loop(scanlight, camera, args, state, flats, levels):
 # CLI
 # --------------------------------------------------------------------------
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--session-dir', metavar='DIR', help='Session folder (default: --resume the last one)')
     parser.add_argument('--resume', action='store_true', help='Resume the most recently used session')
@@ -474,6 +587,11 @@ def main():
                             'then scales it to hit the target exposure (default: 180)')
     calib.add_argument('--flat-shots', type=int, default=6, metavar='N',
                        help='Exposures averaged per channel for flat fields (default: 6)')
+    calib.add_argument('--flat-shutter', metavar='SPEED',
+                       help='Shutter speed (e.g. 1/8) to set before the flat pass; flats are '
+                            'shot before a scanning shutter exists, and only the flat\'s shape '
+                            'is used, so it may differ from it. Use when the LED clamps at 255 '
+                            'and the flat is still dim (default: leave the camera alone)')
     calib.add_argument('--skip-flats', action='store_true', help='Reuse existing flats from session dir')
     calib.add_argument('--warmup-seconds', type=float, default=300, metavar='N',
                        help='LED warm-up wait before calibrating (default: 300)')
@@ -492,6 +610,11 @@ def main():
                         help='White-equivalent (R=G=B) LED level while advancing film (default: 32)')
 
     parser.add_argument('--dry-run-shutter', default='1/60', help=argparse.SUPPRESS)
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     if not args.session_dir and not args.resume:
@@ -510,6 +633,14 @@ def main():
         session_dir = session_state.resolve_resume_dir(args.session_dir)
         state = session_state.load_session(session_dir)
     args.session_dir = session_dir
+
+    # Diagnostics land in session.log as soon as the session dir is known. Skipped under
+    # --dry-run, which writes nothing else to the session either.
+    if not args.dry_run:
+        sessionlog.start(session_dir)
+        log.info('watch %s | output %s | backend %s | resolution %s | film %r roll %r',
+                 args.watch_dir, args.output_dir, args.camera_backend, args.resolution,
+                 state['film_stock'], state['roll_id'])
 
     for field, value in (('film_stock', args.film_stock), ('roll_id', args.roll_id), ('date', args.date)):
         if value:

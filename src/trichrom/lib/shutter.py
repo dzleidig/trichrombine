@@ -1,6 +1,13 @@
 """Shutter-speed parsing and selection, shared by every camera backend."""
 
 import math
+import re
+
+# Separators a backend might hand back a shutter ladder with. Capture One returns
+# its list pipe-separated ("Bulb|30|25|...|1/8000"); osascript renders an actual
+# AppleScript list comma-separated. Accept either, plus newlines, rather than
+# betting on one.
+_CHOICE_SEPARATORS = re.compile(r'[|,\n\r]+')
 
 # Standard 1/3-stop ladder, used when a backend can't report the camera's own list.
 STANDARD_CHOICES = [
@@ -24,16 +31,39 @@ def shutter_str_to_seconds(s):
     return float(s)
 
 
+def parse_choice_list(raw):
+    """Split a backend's shutter-ladder string into individual choices.
+
+    Returns None if nothing in the result parses as a duration — a separator we
+    don't know about yields one long unsplittable token, which looks like a valid
+    single-entry list and silently poisons every selection made from it. The
+    caller is expected to fall back to `STANDARD_CHOICES` on None rather than
+    scan a roll against a ladder nobody can read.
+    """
+    choices = [c.strip() for c in _CHOICE_SEPARATORS.split(raw) if c.strip()]
+    if not any(_duration_or_none(c) for c in choices):
+        return None
+    return choices
+
+
+def _duration_or_none(choice):
+    """Seconds for a choice we can both parse and select on, else None."""
+    try:
+        secs = shutter_str_to_seconds(choice)
+    except ValueError:
+        return None
+    if secs is None or secs <= 0:
+        return None
+    return secs
+
+
 def nearest_shutter_choice(choices, target_seconds):
     """Pick the choice whose duration is closest to target_seconds, on a log scale
     (shutter speeds are geometric, so ratio error is what matters, not absolute)."""
     best, best_dist = None, None
     for c in choices:
-        try:
-            secs = shutter_str_to_seconds(c)
-        except ValueError:
-            continue
-        if secs is None or secs <= 0:
+        secs = _duration_or_none(c)
+        if secs is None:
             continue
         dist = abs(math.log(secs) - math.log(target_seconds))
         if best_dist is None or dist < best_dist:

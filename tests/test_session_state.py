@@ -109,3 +109,25 @@ def test_save_leaves_no_temp_file_behind(tmp_path):
     state = session_state.new_session(session_dir, 'HP5', 'r1')
     session_state.save_session(session_dir, state)
     assert list(session_dir.glob('*.tmp')) == []
+
+
+def test_flat_capture_shutter_is_recorded(tmp_path):
+    """Flats are shot before a scanning shutter exists, at whatever the camera happened
+    to be on. That is fine — only the flat's shape is used — but the shutter decides how
+    well exposed it is, so it is the first number worth having when a flat comes back
+    clipped or too dark. Before this it was recorded nowhere."""
+    state = session_state.new_session(tmp_path, 'Portra 400', 'roll01', None)
+    session_state.set_flats(state, {'R': tmp_path / 'R.npy'}, '1/4')
+    session_state.save_session(tmp_path, state)
+
+    written = json.loads((tmp_path / 'session.json').read_text())
+    assert written['flat_capture']['shutter_speed'] == '1/4'
+    assert written['flat_capture']['captured_at'] > 0
+
+
+def test_flat_capture_tolerates_an_unknown_shutter(tmp_path):
+    """A backend that will not report the shutter costs a line of provenance, never the
+    roll — so the field records None rather than the call failing."""
+    state = session_state.new_session(tmp_path, '', '', None)
+    session_state.set_flats(state, {'R': tmp_path / 'R.npy'}, None)
+    assert state['flat_capture']['shutter_speed'] is None

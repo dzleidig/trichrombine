@@ -83,3 +83,31 @@ def test_flat_level_reports_fraction_of_usable_range():
     """Drives the probe that sets LED power before the real flats are shot."""
     frame = _flat_frame(int(0.5 * (WHITE - BLACK[0])))
     assert flat_level(frame, PATTERN, (0,), BLACK, SIZES, WHITE) == pytest.approx(0.5, abs=0.01)
+
+
+def test_too_dark_advice_is_followable_when_the_led_is_maxed():
+    """The point of `led_at_max`. The probe clamps LED power at 255, and on the real rig
+    red needs ~595 to reach target — so it clamps every run. Telling that operator to
+    "raise --flat-brightness" is advice they cannot act on; the levers that remain are
+    exposure ones, and they are legitimate because only the flat's *shape* is applied
+    and shape does not depend on shutter speed."""
+    dark = [_flat_frame(int(0.05 * (WHITE - BLACK[0])))]
+    args = (PATTERN, (0,), BLACK, SIZES, WHITE)
+
+    with pytest.raises(ValueError) as maxed:
+        build_channel_flat(dark, *args, led_at_max=True)
+    msg = str(maxed.value)
+    assert "--flat-brightness" not in msg, "suggested a lever that is already exhausted"
+    assert "shutter" in msg and "aperture" in msg
+
+    with pytest.raises(ValueError) as headroom:
+        build_channel_flat(dark, *args, led_at_max=False)
+    assert "--flat-brightness" in str(headroom.value), "LED power is still worth raising"
+
+
+def test_too_dark_is_still_refused_either_way():
+    """Wording is the only thing led_at_max changes — a dark flat is rejected regardless."""
+    dark = [_flat_frame(int(0.05 * (WHITE - BLACK[0])))]
+    for at_max in (True, False):
+        with pytest.raises(ValueError, match="too dark"):
+            build_channel_flat(dark, PATTERN, (0,), BLACK, SIZES, WHITE, led_at_max=at_max)

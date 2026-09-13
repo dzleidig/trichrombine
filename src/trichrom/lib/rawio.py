@@ -1,8 +1,12 @@
 """Shared rawpy read helpers for the trichromatic (3-shot) capture pipeline."""
 
+import logging
+
 import numpy as np
 import rawpy
 from scipy.ndimage import spline_filter
+
+log = logging.getLogger(__name__)
 
 # Cubic spline for the full-resolution path. Spline interpolation passes exactly
 # through its samples, so every photosite that was really read keeps its measured
@@ -57,11 +61,45 @@ def read_raw(path):
         }
 
 
+# LibRaw's "this file carries no inset crop" sentinel.
+CROP_UNSET = 0xFFFF
+
+
+def active_area(sizes):
+    """
+    Origin and size of the image area, in raw-image coordinates.
+
+    Prefers the camera's own inset crop when the file carries one. LibRaw parses that
+    from the maker metadata but does not apply it — `postprocess()` hands back the
+    larger visible area — so without this the output keeps a border strip that every
+    other converter trims. On the A7R V that is a 20-row, 32-column edge, and the
+    difference between emitting 6374x9566 and the 6336x9504 the camera intends.
+
+    The inset crop is specified relative to the raw image, the same basis as
+    `top_margin`, and LibRaw guarantees `ctop + cheight <= raw_height` — so a set of
+    values failing that bound is not trustworthy and the visible area is used instead.
+    `getattr` because older rawpy builds predate these fields entirely.
+    """
+    crop = (getattr(sizes, 'crop_top_margin', CROP_UNSET),
+            getattr(sizes, 'crop_left_margin', CROP_UNSET),
+            getattr(sizes, 'crop_height', CROP_UNSET),
+            getattr(sizes, 'crop_width', CROP_UNSET))
+    top, left, height, width = crop
+    usable = (
+        CROP_UNSET not in crop
+        and height > 0 and width > 0
+        and top + height <= sizes.raw_height
+        and left + width <= sizes.raw_width
+    )
+    if usable:
+        return top, left, height, width
+    return sizes.top_margin, sizes.left_margin, sizes.height, sizes.width
+
+
 def crop_half_res(plane, sizes):
     """Crop a half-resolution Bayer-channel plane to the active sensor area."""
-    top, left = sizes.top_margin // 2, sizes.left_margin // 2
-    h, w = sizes.height // 2, sizes.width // 2
-    return plane[top:top + h, left:left + w]
+    top, left, height, width = active_area(sizes)
+    return plane[top // 2:top // 2 + height // 2, left // 2:left // 2 + width // 2]
 
 
 def extract_bayer_channel(raw_image, bayer_pattern, channel_index):
@@ -86,29 +124,57 @@ def extract_led_channel_plane(image, pattern, channel_indices, black_per_channel
     return np.mean(planes, axis=0)
 
 
-# How far the strongest Bayer colour must stand above the next for a frame to count as
-# narrowband-lit. The true ratio is set by the CFA's transmission at the LED wavelengths
-# and should be far higher than this — but nobody has measured it for this body, so the
-# threshold stays conservative. Its real job is separating one-LED light from the
-# white-equivalent preview level, where the ratio sits at about 1.
-MIN_DOMINANCE = 2.0
+# How far the strongest LED channel must stand above the *weakest* for a frame to count
+# as narrowband-lit.
+#
+# Against the weakest, not the runner-up, because the runner-up cannot do this job. The
+# green Bayer filter passes a great deal of blue light, so under the blue LED green sits
+# right behind blue — measured on the rig, narrowband blue scores 1.35 on max/second
+# while white light scores 1.69. Blue looks *less* narrowband than white by that
+# statistic, and a threshold of 2.0 duly aborted a roll on a perfectly good frame.
+#
+# The weakest channel is the real tell: under one narrowband LED some channel is always
+# genuinely dark. Measured on the same rig, max/min gives R 27.6, G 11.6, B >=13.7,
+# against 5.65 for all three LEDs together. 8.0 is the geometric midpoint of that gap
+# (sqrt(5.65 * 11.63) = 8.1), so it has comparable margin either way.
+#
+# This is one rig's numbers, and it is a coarse guard rather than a precise
+# discriminator — blue and green overlap too much on a Bayer CFA for precision. The
+# identity check below is the one that actually protects against a channel swap.
+MIN_DOMINANCE = 8.0
 
 
-def channel_means(image, pattern, black_levels, channel_indices, stride=8):
+def channel_means(image, pattern, black_levels, channel_indices, sizes=None, stride=8):
     """Mean black-subtracted signal per LED channel, subsampled.
 
     Subsampled because this answers an identity question, not a measurement one: full
     means over four 15MP planes cost about a quarter of a second per frame and a
     quarter-million samples settle the same argmax in a millisecond.
+
+    Pass `sizes` to measure the active area only. Without it the means include the
+    masked rows below the visible area — on the A7R V that is ~280 of 6656 raw rows,
+    which pulled every channel down about 5%. Proportional, so the ratios survived, but
+    there is no reason to report numbers that do not match what the pipeline works on.
     """
-    return {
-        ch: float(np.mean([
-            extract_bayer_channel(image, pattern, idx)[0][::stride, ::stride].mean()
-            - black_levels[idx]
-            for idx in indices
-        ]))
-        for ch, indices in channel_indices.items()
-    }
+    means = {}
+    for ch, indices in channel_indices.items():
+        per_site = []
+        for idx in indices:
+            sub = extract_bayer_channel(image, pattern, idx)[0]
+            if sizes is not None:
+                sub = crop_half_res(sub, sizes)
+            per_site.append(float(sub[::stride, ::stride].astype(np.float64).mean())
+                            - black_levels[idx])
+        means[ch] = float(np.mean(per_site))
+    return means
+
+
+def _saturated(raw, ch, channel_indices, stride=8):
+    """Whether this channel's photosites are pinned at full scale."""
+    idx = channel_indices[ch][0]
+    sub = crop_half_res(extract_bayer_channel(raw['image'], raw['pattern'], idx)[0],
+                        raw['sizes'])
+    return float((sub[::stride, ::stride] >= raw['white_level']).mean()) > 0.5
 
 
 def verify_channel(raw, expected, channel_indices):
@@ -126,25 +192,31 @@ def verify_channel(raw, expected, channel_indices):
 
     Returns the dominance ratio; raises ValueError if the frame fails.
     """
-    means = channel_means(raw['image'], raw['pattern'],
-                          raw['black_level_per_channel'], channel_indices)
+    means = channel_means(raw['image'], raw['pattern'], raw['black_level_per_channel'],
+                          channel_indices, sizes=raw['sizes'])
     ranked = sorted(means.values(), reverse=True)
     summary = ', '.join(f'{ch}={means[ch]:.0f}' for ch in sorted(means))
 
     if ranked[0] <= 0:
         raise ValueError(f"frame is black ({summary}) — did the LED fire?")
 
-    dominance = ranked[0] / ranked[1] if ranked[1] > 0 else float('inf')
-
-    # Checked before identity: when no colour dominates, the argmax is meaningless and
-    # naming one would only mislead. This is the case for a frame caught under the
-    # white-equivalent preview light rather than a single LED.
-    if dominance < MIN_DOMINANCE:
-        raise ValueError(
-            f"frame is not narrowband-lit: no channel dominates ({summary}, "
-            f"ratio {dominance:.2f} < {MIN_DOMINANCE}). Shot under preview light?")
-
+    dominance = ranked[0] / ranked[-1] if ranked[-1] > 0 else float('inf')
     got = max(means, key=means.get)
+    # Every frame's channel data, pass or fail. These are the numbers that diagnosed
+    # both the mis-attribution guard and the saturated blue probe, and they were only
+    # recoverable afterwards by re-reading the ARWs.
+    log.debug('verify %s: %s | dominance %.2f | reads as %s',
+              expected, summary, dominance, got)
+
+    # Checked before identity: when no channel is dark, the argmax is close to arbitrary
+    # and naming one would mislead. A saturated frame is exempt, because clipping pins
+    # the dominant channel while the others keep climbing — so the ratio is only a lower
+    # bound. Passing is still conclusive (the true ratio is higher); failing is not.
+    if dominance < MIN_DOMINANCE and not _saturated(raw, got, channel_indices):
+        raise ValueError(
+            f"frame is not narrowband-lit: no channel is dark ({summary}, "
+            f"ratio {dominance:.1f} < {MIN_DOMINANCE}). Shot under preview light?")
+
     if got != expected:
         raise ValueError(
             f"frame expected to be the {expected} exposure reads as {got} "
@@ -161,8 +233,14 @@ def active_site_offsets(row_offset, col_offset, sizes):
     photosite. Folding `margin % 2` into the offset makes the mapping correct for
     either parity instead of silently misregistering the channels on a body whose
     margins aren't even.
+
+    Reads the margin from `active_area()` so it follows whichever origin the crop
+    actually used. The A7R V's inset margins happen to be even, but nothing guarantees
+    that on another body, and a phase computed against the wrong origin would shift the
+    channels against each other with no error anywhere.
     """
-    return row_offset - (sizes.top_margin % 2), col_offset - (sizes.left_margin % 2)
+    top, left, _, _ = active_area(sizes)
+    return row_offset - (top % 2), col_offset - (left % 2)
 
 
 def upsample_bayer_plane(plane, row_offset, col_offset, out_shape, order=INTERPOLATION_ORDER):

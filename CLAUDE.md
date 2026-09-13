@@ -105,9 +105,15 @@ session → calibration → capture loop, plus `--resume` and `--recalibrate`) w
 touching hardware, so it catches wiring and argument regressions the unit tests can't
 see. Run it on both backends after changing anything in `scan.py`.
 
-Synthetic raw frames in tests should use **nonzero** sensor margins. Real bodies have
-them; zero-margin fixtures hide active-area crop mismatches, which is exactly the class
-of bug that passes here and breaks at the rig.
+Synthetic raw frames in tests should use **nonzero** sensor margins, so that an
+active-area crop mismatch cannot hide — that class of bug passes on a zero-margin
+fixture and breaks at the rig.
+
+Note though that the A7R V reports `top_margin=0, left_margin=0` — the margin that
+matters is in the `crop_*` fields, not where you would look first. Its real geometry is
+`raw 6656x9728, height 6374, width 9566, crop_top_margin 20, crop_left_margin 32,
+crop_width 9504, crop_height 6336`. `active_area()` in `lib/rawio.py` is the single place
+that resolves this; nothing else should read the margins directly.
 
 When adding tests, check they actually catch a regression — break the thing on purpose
 and confirm the relevant test fails.
@@ -156,9 +162,41 @@ Flats come before both passes (`capture_flats`, holder off, bare light, averaged
 over `--flat-shots` exposures per channel), and that ordering is forced: the leader
 readings both passes depend on are themselves flat-corrected. Which means the flats
 are shot *before* a shutter speed exists, so LED power — not shutter — is the
-exposure lever for them. `_probe_flat_power()` shoots one bare-light frame per
-channel, reads it with `flat_level()`, and scales power by direct ratio to land near
-`FLAT_TARGET`; the real flats then follow at that power. Same reasoning as pass 1:
+exposure lever for them. `_probe_flat_power()` shoots a bare-light frame per channel, reads it with
+`flat_level()`, and scales power by direct ratio to land near `FLAT_TARGET`; the real
+flats then follow at that power.
+
+It re-probes when the reading comes back at or above `FLAT_MAX`, and that is not
+belt-and-braces. The ratio is only meaningful on an unclipped reading: a saturated frame
+reports 100% of usable range however far past full scale it truly is, so scaling from it
+under-corrects every time. On the first real run the green probe at power 180 was 99.93%
+clipped, reported 100%, and yielded power 126 — which produced a 96% flat and aborted the
+roll. Halving and looking again recovers the real number (power 90 reads 68.6%, giving
+92, which lands at 70%). Red on the same rig needs power ~600 to reach target, so it
+clamps at 255 and lands near 30%: legal, dim, and now said out loud, because the only
+remaining levers are aperture and shutter.
+
+The flats' shutter is a free variable, and that is worth stating because it looks like
+it should not be. Flats run before the exposure pass has chosen a scanning shutter, so
+they are shot at whatever the camera happens to be on, or at `--flat-shutter`. That is
+legitimate: the flat is peak-normalized, so only its *shape* is ever applied, and shape
+is illumination falloff times lens vignetting — neither depends on shutter speed. What
+the shutter does decide is how well exposed the flat is, which matters because LED power
+alone is not always enough. On the real rig red needs power ~595 to reach `FLAT_TARGET`
+and clamps at 255 every run, so a slower shutter is the only lever left. Whichever
+shutter was used is recorded in `session.json` under `flat_capture`, since it is the
+first number worth knowing when a flat comes back clipped or dim.
+
+`--flat-shutter` defaults to leaving the camera alone, deliberately: whether Capture One
+accepts a shutter write is still unverified (Open items, item 4), so the default path
+touches nothing. `build_channel_flat()` takes `led_at_max` so its too-dark message can
+name a lever the operator can actually use — with the LED already at 255, "raise
+`--flat-brightness`" is advice that cannot be followed.
+
+`capture_flats()` blocks on `input()` before any of that, and the *order* is the point:
+it used to print "remove the film holder ... before continuing" and then continue, so
+the flats were shot through the holder and its edges went into the correction divided
+into every frame. A flat like that looks entirely plausible. Same reasoning as pass 1:
 LED output is roughly linear with drive current, so no search loop is needed.
 
 Before any of it, `warm_up()` cycles R/G/B one channel at a time at
@@ -280,8 +318,15 @@ readable; whether C1 exposes it as *writable* is undocumented and may vary by bo
 `set_shutter_speed()` falls back to prompting the operator to dial it in if the write is
 refused — a once-per-roll calibration step, never in the per-frame path.
 `get_shutter_choices()` tries `available shutter speeds` and falls back to the standard
-ladder in `lib/shutter.py`. Shutter values are checked for quote/backslash before being
-interpolated into AppleScript.
+ladder in `lib/shutter.py`. C1 returns that list as one **pipe-separated** string, not as
+an AppleScript list — confirmed at the rig on the A7R V:
+`Bulb|30|25|...|1/3|1/4|...|1/8000`, slowest first. Splitting it on commas (as this did
+until the first calibration run) yields a single token that parses as no duration at all,
+so `nearest_shutter_choice()` returns `None` and pass 2 dies in the AppleScript quoter
+several frames later. `parse_choice_list()` accepts either separator and returns `None`
+when *nothing* in the result parses, so an unknown third separator falls back to the
+standard ladder instead of pretending to be a one-entry list. Shutter values are checked
+for quote/backslash before being interpolated into AppleScript.
 
 **`lib/gphoto.py`** — `trigger_and_wait()` fires the shutter and blocks on
 `wait_for_event()` for `GP_EVENT_CAPTURE_COMPLETE`/`GP_EVENT_FILE_ADDED` rather
@@ -292,6 +337,12 @@ widget. Its import is guarded, so the package works without python-gphoto2 insta
 **`lib/shutter.py`** — `nearest_shutter_choice()` picks the closest available value to a
 target duration on a log scale, since shutter steps are geometric; `STANDARD_CHOICES` is
 the 1/3-stop ladder used when a backend can't report the camera's own list.
+`parse_choice_list()` splits a backend's ladder string on `|` or `,` and returns `None`
+if no token in it parses, which is the shape the caller must treat as "no list."
+`nearest_shutter_choice()` still returns `None` for an unusable set, and
+`adjust_exposure()` exits on that rather than passing it on — a `None` here means the
+exposure pass has no way to hit its target, and scanning a roll at whatever shutter
+happens to be dialled in is the worse outcome.
 
 **`lib/session_state.py`** — `session.json` lives in the session folder so
 provenance travels with the roll if it's moved or archived. A separate small
@@ -299,7 +350,17 @@ pointer file (`~/.trichrom/last_session`) records the most recently used session
 dir for `--resume`; losing it costs convenience. Per-frame status is recorded so a
 mid-roll merge failure identifies exactly which frames need redoing.
 
-**`lib/rawio.py`** — rawpy read plus the Bayer plane helpers. `upsample_bayer_plane()`
+**`lib/rawio.py`** — rawpy read plus the Bayer plane helpers. `active_area()` decides
+what counts as the image: the camera's inset crop when the file carries one, otherwise
+the visible area. LibRaw parses that crop from maker metadata but never applies it —
+`postprocess()` returns the larger visible area — so cropping by `top_margin` +
+`height`/`width`, as this did until the first real roll, keeps a border strip every other
+converter trims. On the A7R V that is 20 rows and 32 columns: 6374x9566 emitted where the
+camera intends 6336x9504. The crop is relative to the *raw* image, the same basis as
+`top_margin`, and LibRaw guarantees `ctop + cheight <= raw_height`; values breaking that
+bound, carrying the `0xffff` sentinel, or missing entirely on an older rawpy fall back to
+the visible area. `active_site_offsets()` takes the Bayer phase from whichever origin won,
+since an odd inset margin would otherwise misregister the channels silently. `upsample_bayer_plane()`
 carries the full-resolution path, and three things in it are load-bearing rather than
 incidental, each found by a test that failed first:
 
@@ -357,6 +418,24 @@ this body, and the threshold's real job is separating one-LED light from the
 white-equivalent preview level, which sits near 1. The measured ratio goes into the
 sidecar, so a roll drifting toward 1 is visible after the fact.
 
+**`lib/sessionlog.py`** — the session's diagnostic record, written to `session.log`
+beside `session.json`, appending so a dir accumulates its failed calibrations and the
+retries after them as evidence about one roll.
+
+Deliberately *not* a transcript of the terminal. The printed output is a narrative for
+the operator, and re-reading it later rarely answers anything; what answers things are
+the numbers behind each decision. Every failure this rig has produced was diagnosed
+from measurements that had to be recovered afterwards by re-reading the ARWs — the
+library versions (a source-built numpy made `scipy.ndimage` return silently wrong
+results), the sensor geometry (the camera's real border is in `crop_top_margin`, not
+`top_margin`), the per-channel means a frame was refused on. Those are what it records.
+
+Ordinary `logging`, configured once on the `trichrom` logger, so any module can
+`getLogger(__name__)` without knowing this module exists. `propagate` is off: the
+operator's output is `print()`'s job, and a logger reaching stdout would double every
+line. When adding a log call, the test is whether the line would answer a question at
+the rig — levels and powers yes, progress chatter no.
+
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
 pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,
 3=G2 (second green in RGGB); black/white levels and active sensor area margins are
@@ -402,7 +481,8 @@ but has only been dry-run tested.
    `camera` class: `shutter speed (text)` means settable, `(text, r/o)` means read-only.
    If read-only, nothing breaks — `set_shutter_speed()` already degrades to prompting
    the operator during calibration — but you'll dial shutter speed by hand each pass-2
-   iteration. Reading it is already confirmed to work.
+   iteration. Reading it is confirmed to work, as is reading
+   `available shutter speeds` (see the pipe-separated format above).
 
 **Fallback if the C1 trigger doesn't work:** `--camera-backend gphoto2` drives the
 camera directly, but there's an open unresolved gphoto2 capture failure against the

@@ -18,6 +18,7 @@ merged TIFF.
 """
 
 import json
+import logging
 import time
 
 import numpy as np
@@ -26,9 +27,11 @@ import tifffile
 
 from .flatfield import apply_flat
 from .icc import build_linear_prophoto_icc
-from .rawio import (INTERPOLATION_ORDER, active_site_offsets, crop_half_res,
+from .rawio import (INTERPOLATION_ORDER, active_area, active_site_offsets, crop_half_res,
                     extract_bayer_channel, read_raw, upsample_bayer_plane, verify_channel)
 from .scanner import CHANNEL_BAYER_INDICES
+
+log = logging.getLogger(__name__)
 
 _ICC_PROFILE = None
 
@@ -88,7 +91,8 @@ def _channel_field(raw, ch, flat, full_resolution):
     if not full_resolution:
         return measured, peak
 
-    out_shape = (sizes.height, sizes.width)
+    _, _, out_h, out_w = active_area(sizes)
+    out_shape = (out_h, out_w)
     fields = [
         upsample_bayer_plane(sub, *active_site_offsets(row_off, col_off, sizes),
                              out_shape=out_shape)
@@ -144,6 +148,11 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
         plane *= 65535.0
         plane += 0.5
         image[..., i] = plane
+
+    log.info('frame %s: peaks %s | dominance %s | %s | -> %s',
+             meta.get('frame', '?'), {c: round(v, 4) for c, v in peaks.items()},
+             {c: (round(v, 1) if v != float('inf') else 'inf') for c, v in dominance.items()},
+             'full' if full_resolution else 'half', output_path)
 
     tiff_meta = dict(meta)
     tiff_meta['peaks'] = peaks
