@@ -15,7 +15,7 @@ in the capture folder, which the caller waits for.
 import subprocess
 import sys
 
-from .shutter import STANDARD_CHOICES
+from .shutter import STANDARD_CHOICES, parse_choice_list
 
 APP = "Capture One"
 
@@ -34,6 +34,8 @@ def _tell(body):
 
 def _applescript_safe(value):
     """Guard against breaking out of the quoted AppleScript string literal."""
+    if not isinstance(value, str):
+        raise ValueError(f"Shutter value is not a string: {value!r}")
     if '"' in value or '\\' in value:
         raise ValueError(f"Unsafe shutter value: {value!r}")
     return value
@@ -79,13 +81,24 @@ def get_shutter_speed(camera):
 
 def get_shutter_choices(camera):
     """The shutter speeds Capture One reports for the attached camera, falling back
-    to the standard ladder if this version doesn't expose the list."""
+    to the standard ladder if this version doesn't expose the list, or reports it in
+    a shape we can't read.
+
+    C1 hands the ladder back as one pipe-separated string ("Bulb|30|...|1/8000"),
+    not as an AppleScript list — so splitting on commas returns a single token that
+    parses as nothing, which is how a whole roll's exposure pass ended up selecting
+    from an empty candidate set.
+    """
     try:
         raw = _osascript(_tell('available shutter speeds of camera of current document'))
     except RuntimeError:
         return list(STANDARD_CHOICES)
-    choices = [c.strip() for c in raw.split(',') if c.strip()]
-    return choices or list(STANDARD_CHOICES)
+    choices = parse_choice_list(raw)
+    if not choices:
+        print("  Capture One reported shutter speeds in an unreadable form "
+              f"({raw[:60]!r}) — falling back to the standard ladder.")
+        return list(STANDARD_CHOICES)
+    return choices
 
 
 def set_shutter_speed(camera, value, dry_run=False):

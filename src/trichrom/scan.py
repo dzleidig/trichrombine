@@ -376,9 +376,17 @@ def adjust_exposure(scanlight, camera, args, powers, flats):
             print(f"  Converged after {attempt} shutter iteration(s).\n")
             return args.cam.get_shutter_speed(camera), peaks
 
-        current = shutter_str_to_seconds(args.cam.get_shutter_speed(camera))
+        reported = args.cam.get_shutter_speed(camera)
+        current = shutter_str_to_seconds(reported)
+        if current is None or current <= 0:
+            sys.exit(f"exposure-targeting: camera reports shutter speed {reported!r}, which "
+                     "isn't a duration to scale from. Take it off Bulb and re-run calibration.")
         choices = args.cam.get_shutter_choices(camera)
         new_shutter = nearest_shutter_choice(choices, current * ratio)
+        if new_shutter is None:
+            sys.exit(f"exposure-targeting: no usable shutter speed among the {len(choices)} the "
+                     f"camera offers ({', '.join(map(str, choices[:6]))}...). Cannot target "
+                     "exposure; calibration aborted rather than scanning at the wrong one.")
         print(f"  Adjusting shutter -> {new_shutter}\n")
         args.cam.set_shutter_speed(camera, new_shutter, dry_run=args.dry_run)
 

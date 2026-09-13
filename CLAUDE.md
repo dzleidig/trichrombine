@@ -318,8 +318,15 @@ readable; whether C1 exposes it as *writable* is undocumented and may vary by bo
 `set_shutter_speed()` falls back to prompting the operator to dial it in if the write is
 refused — a once-per-roll calibration step, never in the per-frame path.
 `get_shutter_choices()` tries `available shutter speeds` and falls back to the standard
-ladder in `lib/shutter.py`. Shutter values are checked for quote/backslash before being
-interpolated into AppleScript.
+ladder in `lib/shutter.py`. C1 returns that list as one **pipe-separated** string, not as
+an AppleScript list — confirmed at the rig on the A7R V:
+`Bulb|30|25|...|1/3|1/4|...|1/8000`, slowest first. Splitting it on commas (as this did
+until the first calibration run) yields a single token that parses as no duration at all,
+so `nearest_shutter_choice()` returns `None` and pass 2 dies in the AppleScript quoter
+several frames later. `parse_choice_list()` accepts either separator and returns `None`
+when *nothing* in the result parses, so an unknown third separator falls back to the
+standard ladder instead of pretending to be a one-entry list. Shutter values are checked
+for quote/backslash before being interpolated into AppleScript.
 
 **`lib/gphoto.py`** — `trigger_and_wait()` fires the shutter and blocks on
 `wait_for_event()` for `GP_EVENT_CAPTURE_COMPLETE`/`GP_EVENT_FILE_ADDED` rather
@@ -330,6 +337,12 @@ widget. Its import is guarded, so the package works without python-gphoto2 insta
 **`lib/shutter.py`** — `nearest_shutter_choice()` picks the closest available value to a
 target duration on a log scale, since shutter steps are geometric; `STANDARD_CHOICES` is
 the 1/3-stop ladder used when a backend can't report the camera's own list.
+`parse_choice_list()` splits a backend's ladder string on `|` or `,` and returns `None`
+if no token in it parses, which is the shape the caller must treat as "no list."
+`nearest_shutter_choice()` still returns `None` for an unusable set, and
+`adjust_exposure()` exits on that rather than passing it on — a `None` here means the
+exposure pass has no way to hit its target, and scanning a roll at whatever shutter
+happens to be dialled in is the worse outcome.
 
 **`lib/session_state.py`** — `session.json` lives in the session folder so
 provenance travels with the roll if it's moved or archived. A separate small
@@ -450,7 +463,8 @@ but has only been dry-run tested.
    `camera` class: `shutter speed (text)` means settable, `(text, r/o)` means read-only.
    If read-only, nothing breaks — `set_shutter_speed()` already degrades to prompting
    the operator during calibration — but you'll dial shutter speed by hand each pass-2
-   iteration. Reading it is already confirmed to work.
+   iteration. Reading it is confirmed to work, as is reading
+   `available shutter speeds` (see the pipe-separated format above).
 
 **Fallback if the C1 trigger doesn't work:** `--camera-backend gphoto2` drives the
 camera directly, but there's an open unresolved gphoto2 capture failure against the
