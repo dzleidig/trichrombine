@@ -1,8 +1,12 @@
 """Shared rawpy read helpers for the trichromatic (3-shot) capture pipeline."""
 
+import logging
+
 import numpy as np
 import rawpy
 from scipy.ndimage import spline_filter
+
+log = logging.getLogger(__name__)
 
 # Cubic spline for the full-resolution path. Spline interpolation passes exactly
 # through its samples, so every photosite that was really read keeps its measured
@@ -198,6 +202,11 @@ def verify_channel(raw, expected, channel_indices):
 
     dominance = ranked[0] / ranked[-1] if ranked[-1] > 0 else float('inf')
     got = max(means, key=means.get)
+    # Every frame's channel data, pass or fail. These are the numbers that diagnosed
+    # both the mis-attribution guard and the saturated blue probe, and they were only
+    # recoverable afterwards by re-reading the ARWs.
+    log.debug('verify %s: %s | dominance %.2f | reads as %s',
+              expected, summary, dominance, got)
 
     # Checked before identity: when no channel is dark, the argmax is close to arbitrary
     # and naming one would mislead. A saturated frame is exempt, because clipping pins

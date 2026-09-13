@@ -418,24 +418,23 @@ this body, and the threshold's real job is separating one-LED light from the
 white-equivalent preview level, which sits near 1. The measured ratio goes into the
 sidecar, so a roll drifting toward 1 is visible after the fact.
 
-**`lib/sessionlog.py`** — mirrors everything the run prints into `session.log`, beside
-`session.json`, appending so a session dir accumulates its failed calibrations and
-retries as evidence about one roll.
+**`lib/sessionlog.py`** — the session's diagnostic record, written to `session.log`
+beside `session.json`, appending so a dir accumulates its failed calibrations and the
+retries after them as evidence about one roll.
 
-A stream tee rather than the `logging` module, because the requirement is a transcript
-rather than structured diagnostics. `logging` only records what is deliberately routed
-through it, so it would miss any `print` not converted, every `input()` prompt, output
-from rawpy or scipy, and — the decisive one — `sys.exit("...")` messages and tracebacks,
-which the interpreter writes to stderr itself. Those are how most failed runs end, so a
-`logging`-based log would record everything except why the roll stopped. The two compose
-rather than compete: a `logging` StreamHandler on stdout would flow into the file for
-free if structure is ever wanted.
+Deliberately *not* a transcript of the terminal. The printed output is a narrative for
+the operator, and re-reading it later rarely answers anything; what answers things are
+the numbers behind each decision. Every failure this rig has produced was diagnosed
+from measurements that had to be recovered afterwards by re-reading the ARWs — the
+library versions (a source-built numpy made `scipy.ndimage` return silently wrong
+results), the sensor geometry (the camera's real border is in `crop_top_margin`, not
+`top_margin`), the per-channel means a frame was refused on. Those are what it records.
 
-Nothing restores the streams. The interpreter prints `SystemExit` messages and tracebacks
-after `main()` has unwound, so restoring on the way out drops exactly the line that
-explains the abort — measured: restoring in a `finally` loses it, leaving the tee keeps
-it. Every write is flushed, so the process ending takes nothing with it. Skipped under
-`--dry-run`, which writes nothing else to the session either.
+Ordinary `logging`, configured once on the `trichrom` logger, so any module can
+`getLogger(__name__)` without knowing this module exists. `propagate` is off: the
+operator's output is `print()`'s job, and a logger reaching stdout would double every
+line. When adding a log call, the test is whether the line would answer a question at
+the rig — levels and powers yes, progress chatter no.
 
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
 pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,

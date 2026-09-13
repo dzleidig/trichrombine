@@ -33,6 +33,7 @@ it explicitly to write merged TIFFs somewhere else.
 """
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
@@ -43,7 +44,8 @@ from .lib import captureone, gphoto, session_state, sessionlog
 from .lib.flatfield import FLAT_MAX, FLAT_TARGET, build_channel_flat, flat_level
 from .lib.leader import measure_leader_level
 from .lib.merge_tri import merge_triplet
-from .lib.rawio import crop_half_res, extract_led_channel_plane, read_raw, verify_channel
+from .lib.rawio import (active_area, crop_half_res, extract_led_channel_plane, read_raw,
+                        verify_channel)
 from .lib.scanner import CHANNEL_BAYER_INDICES, Scanlight, find_scanlight_port, wait_for_new_file
 from .lib.shutter import nearest_shutter_choice, shutter_str_to_seconds
 
@@ -59,6 +61,8 @@ WARMUP_DWELL_SECONDS = 3.0
 # power, so four covers a 16x overshoot — well past anything the rig has shown.
 MAX_FLAT_PROBES = 4
 CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
+
+log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +147,19 @@ def _require_shot(scanlight, camera, args, ch, level, what):
     return path
 
 
+_geometry_recorded = False
+
+
+def _record_geometry_once(raw):
+    """Which rectangle the pipeline settled on, logged from the first raw it reads.
+    The A7R V reports top_margin=0 and keeps its real border in crop_top_margin, so
+    this is not something to infer after the fact."""
+    global _geometry_recorded
+    if not _geometry_recorded:
+        sessionlog.record_geometry(raw['sizes'], active_area(raw['sizes']))
+        _geometry_recorded = True
+
+
 def _read_verified(path, ch, what):
     """read_raw for the calibration path, refusing a frame that wasn't lit by the LED
     we think it was.
@@ -151,9 +168,11 @@ def _read_verified(path, ch, what):
     balance and shutter speed for the whole roll, so a mis-attributed frame doesn't
     spoil one image, it quietly mis-exposes every one that follows."""
     raw = read_raw(path)
+    _record_geometry_once(raw)
     try:
         verify_channel(raw, ch, CHANNEL_BAYER_INDICES)
     except ValueError as exc:
+        log.error('calibration aborted on the %s frame for channel %s: %s', what, ch, exc)
         sys.exit(f"Calibration aborted on the {what} frame for channel {ch}: {exc}")
     return raw
 
@@ -213,6 +232,7 @@ def _probe_flat_power(scanlight, camera, args, ch):
         if power <= 1:
             sys.exit(f"Flat probe for channel {ch} is saturated even at minimum LED "
                      f"power. Stop down the aperture or shorten the shutter.")
+        log.info('%s flat probe: power %d read %.1f%% - saturated, halving', ch, power, level * 100)
         print(f"  [{ch}] probe at power {power} reads {level:.0%} — saturated, "
               f"halving to {max(1, power // 2)} and re-probing")
         power = max(1, power // 2)
@@ -222,6 +242,8 @@ def _probe_flat_power(scanlight, camera, args, ch):
 
     wanted = round(power * FLAT_TARGET / level)
     chosen = max(1, min(255, wanted))
+    log.info('%s flat probe: power %d read %.1f%% -> power %d (wanted %d, clamped=%s)',
+             ch, power, level * 100, chosen, wanted, wanted > 255)
     print(f"  [{ch}] probe at power {power} read {level:.0%} of usable "
           f"range -> shooting flats at power {chosen}")
     if wanted > 255:
@@ -308,6 +330,7 @@ def capture_flats(scanlight, camera, args, session_dir):
         flat_path = flats_dir / f'{ch}.npy'
         np.save(flat_path, flat)
         flat_paths[ch] = flat_path
+        log.info('%s flat: %d exposures at power %d -> %s', ch, args.flat_shots, power, flat_path)
         print(f"[{ch}] Flat saved -> {flat_path}\n")
 
     return flat_paths, shutter_speed
@@ -325,6 +348,7 @@ def balance_channels(scanlight, camera, args, flats):
             continue
         level, _ = _measure_channel_level(path, ch, flats)
         levels[ch] = level
+        log.info('%s balance: leader level %.1f at power %d', ch, level, args.start_power)
         print(f"  [{ch}] leader level = {level:.1f} at power {args.start_power}")
 
     weakest = min(levels.values())
@@ -369,6 +393,8 @@ def adjust_exposure(scanlight, camera, args, powers, flats):
         reference = float(np.mean(list(peaks.values())))
         ratio = target / reference
 
+        log.info('exposure attempt %d: peaks %s | usable %.0f | target %.0f | ratio %.3f',
+                 attempt, {c: round(v, 1) for c, v in peaks.items()}, usable_range, target, ratio)
         print(f"  usable range = {usable_range:.0f}, target = {target:.0f}, "
               f"reference = {reference:.1f}, ratio = {ratio:.3f}")
 
@@ -455,6 +481,8 @@ def run_calibration(scanlight, camera, args, state, session_dir):
         print(f"  {ch}: power={powers[ch]}  peak={peaks[ch]:.1f}")
     print(f"  shutter speed: {shutter}\n")
 
+    log.info('calibration done: powers %s shutter %s peaks %s',
+             powers, shutter, {c: round(v, 1) for c, v in peaks.items()})
     session_state.set_calibration(state, powers, shutter, peaks)
     if not args.dry_run:
         session_state.save_session(session_dir, state)
@@ -606,13 +634,13 @@ def main():
         state = session_state.load_session(session_dir)
     args.session_dir = session_dir
 
-    # From here on everything printed is mirrored into session.log. Started as early as
-    # the session dir is known, and skipped under --dry-run, which writes nothing else to
-    # the session either. Never stopped: the interpreter prints sys.exit messages and
-    # tracebacks after main() has unwound, so restoring the streams would drop exactly
-    # the line that explains why a roll stopped.
+    # Diagnostics land in session.log as soon as the session dir is known. Skipped under
+    # --dry-run, which writes nothing else to the session either.
     if not args.dry_run:
         sessionlog.start(session_dir)
+        log.info('watch %s | output %s | backend %s | resolution %s | film %r roll %r',
+                 args.watch_dir, args.output_dir, args.camera_backend, args.resolution,
+                 state['film_stock'], state['roll_id'])
 
     for field, value in (('film_stock', args.film_stock), ('roll_id', args.roll_id), ('date', args.date)):
         if value:

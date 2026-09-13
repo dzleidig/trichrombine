@@ -1,78 +1,90 @@
-"""Mirror everything the run prints into session.log, beside session.json."""
+"""
+Diagnostic log for a scanning session, written to session.log beside session.json.
 
+Not a transcript of what scrolled past. The terminal output is a narrative for the
+operator, and re-reading it later rarely answers anything. What answers things are the
+numbers behind each decision: the level a probe read, the channel means a frame was
+accepted or refused on, the sensor geometry, the library versions in play. Every
+failure this rig has produced so far was diagnosed from measurements like those, and in
+each case they had to be recovered afterwards by re-reading the ARWs.
+
+Appends, so a session dir accumulates its failed calibrations and the retries after
+them as evidence about one roll.
+"""
+
+import logging
+import platform
 import sys
-import time
 from pathlib import Path
 
 LOG_NAME = 'session.log'
+FORMAT = '%(asctime)s %(levelname)-5s %(name)-24s %(message)s'
 
+# Configured on the package logger, so every getLogger(__name__) under trichrom.* feeds
+# into it without each module needing to know this exists.
+ROOT = 'trichrom'
 
-class _Tee:
-    """
-    Writes to the terminal and to the log at once.
-
-    Flushed on every write because the failures worth reading back are the ones that
-    end the process: an abort mid-calibration must not cost the line explaining it.
-
-    Do not give this class `fileno`, `encoding` and `errors`. With all of those present
-    `input()` looks at a real terminal, takes CPython's readline path, and writes its
-    prompt straight to the tty — past this object, so operator prompts vanish from the
-    log. Lacking any one of them is enough to keep the ordinary path, which writes
-    through `write()` like everything else.
-    """
-
-    def __init__(self, stream, log):
-        self._stream = stream
-        self._log = log
-
-    def write(self, text):
-        self._stream.write(text)
-        self._stream.flush()
-        self._log.write(text)
-        self._log.flush()
-        return len(text)
-
-    def flush(self):
-        self._stream.flush()
-        self._log.flush()
-
-    def isatty(self):
-        return False
+log = logging.getLogger(__name__)
 
 
 def start(session_dir, argv=None):
-    """
-    Begin mirroring stdout and stderr into `session_dir/session.log`.
-
-    stderr as well as stdout, because the lines most worth having are the ones that
-    end the roll: `sys.exit("...")` and tracebacks both go to stderr, so a log of
-    stdout alone would record everything except why the run stopped.
-
-    Appends. A session dir accumulates runs — a failed calibration, a retry, the
-    roll itself — and each one's log is evidence about the same roll.
-
-    Returns a callable that restores the original streams — for tests. A real run must
-    *not* call it. `sys.exit("...")` and uncaught tracebacks are printed by the
-    interpreter after `main()` has unwound, so anything that restores the streams on the
-    way out drops the one line explaining why the roll stopped. Measured: restoring in a
-    `finally` loses the abort message entirely; leaving the tee in place keeps it. The
-    process is ending anyway, and every write is already flushed.
-    """
+    """Begin writing session.log in `session_dir`. Returns its path."""
     path = Path(session_dir) / LOG_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    log = open(path, 'a', encoding='utf-8')
 
-    command = ' '.join(argv if argv is not None else sys.argv)
-    log.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')}  {command}\n")
-    log.flush()
+    handler = logging.FileHandler(path, encoding='utf-8')
+    handler.setFormatter(logging.Formatter(FORMAT))
 
-    saved_out, saved_err = sys.stdout, sys.stderr
-    sys.stdout = _Tee(saved_out, log)
-    sys.stderr = _Tee(saved_err, log)
+    root = logging.getLogger(ROOT)
+    root.setLevel(logging.DEBUG)
+    root.addHandler(handler)
+    # The operator's output is written by print(); this record is separate and must not
+    # reach the terminal through an ancestor logger.
+    root.propagate = False
 
-    def stop():
-        sys.stdout, sys.stderr = saved_out, saved_err
-        log.close()
+    log.info('=== run: %s', ' '.join(argv if argv is not None else sys.argv))
+    _record_environment()
+    return path
 
-    return stop
 
+def stop():
+    """Close and detach the handler. For tests; a real run just exits."""
+    root = logging.getLogger(ROOT)
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        handler.close()
+
+
+def _record_environment():
+    """
+    Versions and platform, once per run.
+
+    Worth the line: a numpy built from source against a Python it predated once made
+    scipy.ndimage return silently wrong numbers here, and that looked like a bug in the
+    leader measurement for as long as it took to think of checking versions.
+    """
+    import importlib.metadata as meta
+
+    versions = []
+    for package in ('numpy', 'scipy', 'rawpy', 'tifffile', 'pyexiv2', 'pyserial'):
+        try:
+            versions.append(f'{package} {meta.version(package)}')
+        except Exception:
+            versions.append(f'{package} absent')
+    log.info('python %s on %s', sys.version.split()[0], platform.platform())
+    log.info('deps: %s', ', '.join(versions))
+
+
+def record_geometry(sizes, active):
+    """
+    The crop actually used, once per run.
+
+    The A7R V reports top_margin=0 and keeps its real border in crop_top_margin, so
+    which rectangle the pipeline settled on is not something to infer after the fact.
+    """
+    log.info('raw %sx%s | visible %sx%s at (%s,%s) | camera crop %sx%s at (%s,%s) | using %s',
+             sizes.raw_height, sizes.raw_width, sizes.height, sizes.width,
+             sizes.top_margin, sizes.left_margin,
+             getattr(sizes, 'crop_height', '?'), getattr(sizes, 'crop_width', '?'),
+             getattr(sizes, 'crop_top_margin', '?'), getattr(sizes, 'crop_left_margin', '?'),
+             active)

@@ -147,9 +147,11 @@ calibration before anything else:
    the leader lands at 80-90% of usable range (`white_level - black_level`).
 
 The result — channel levels, shutter speed, flat-field paths — is written to
-`session.json` inside `--session-dir`. Everything the run prints is also mirrored to
-`session.log` beside it, including the reason it stopped if it did; runs append, so a
-failed calibration and the retry after it both stay on record.
+`session.json` inside `--session-dir`. A `session.log` beside it records the numbers
+behind each decision — library versions, sensor geometry, per-channel measurements,
+chosen powers and shutter — which is what a failure usually turns on. Runs append, so a
+failed calibration and the retry after it both stay on record; attach it if something
+goes wrong.
 
 ### Capture and merge
 
