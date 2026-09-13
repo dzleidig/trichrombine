@@ -1,11 +1,10 @@
 """
-Shared hardware utilities: Scanlight serial control, Capture One triggering,
-ARW file watching, and raw channel sampling.
+Shared hardware utilities: Scanlight serial control and ARW file watching.
+Camera control lives in the backend modules (captureone, gphoto).
 """
 
 import glob
 import os
-import subprocess
 import sys
 import time
 
@@ -13,18 +12,15 @@ try:
     import serial
     import serial.tools.list_ports
 except ImportError:
-    sys.exit("pyserial not installed. Run: pip install trichrom[dev]")
+    sys.exit("pyserial not installed. Run: pip install -e .")
 
 BAUD_RATE = 115200
 PACKET_START = 0xFE
 PKT_H2D_SET_COLOR = 0x00
 
-CAPTURE_ONE_APP = "Capture One"
-
-BAYER_INDEX = {'R': 0, 'G': 1, 'B': 2}
-OFF = (0, 0, 0, 0, 0)
-CLIP_THRESHOLD = 14000
-PROBE_BRIGHTNESS = 50
+# Bayer channel indices contributing to each LED channel: green averages both
+# green photosite positions (1=G, 3=G2 in RGGB) for full-resolution-matched planes.
+CHANNEL_BAYER_INDICES = {'R': (0,), 'G': (1, 3), 'B': (2,)}
 
 
 def _build_set_color_packet(r, g, b, w, ir, brightness):
@@ -77,28 +73,6 @@ class Scanlight:
             self._ser.close()
             self._ser = None
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.set_color(*OFF, 255)
-        self.close()
-
-
-def trigger_capture(dry_run):
-    script = f'tell application "{CAPTURE_ONE_APP}" to capture'
-    if dry_run:
-        print(f"  [dry-run] osascript: {script}")
-        return True
-    result = subprocess.run(
-        ['osascript', '-e', script],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"  WARNING: AppleScript error: {result.stderr.strip()}")
-        return False
-    return True
-
 
 def wait_for_new_file(watch_dir, before, timeout):
     """Wait for a new ARW file to appear in watch_dir. Returns the filename or None on timeout."""
@@ -117,54 +91,3 @@ def wait_for_new_file(watch_dir, before, timeout):
         time.sleep(0.1)
     print(f"  WARNING: no new file after {timeout}s, continuing anyway.")
     return None
-
-
-def _load_channel_patch(path, ch_idx):
-    """Extract the center 174x174 Bayer channel patch, black-level subtracted."""
-    try:
-        import rawpy
-        import numpy as np
-    except ImportError:
-        sys.exit("rawpy and numpy are required. Run: pip install trichrom[dev]")
-
-    with rawpy.imread(str(path)) as raw:
-        pattern = raw.raw_pattern.copy()
-        image = raw.raw_image.copy().astype(np.float32)
-        sizes = raw.sizes
-        black = raw.black_level_per_channel
-
-    positions = (pattern == ch_idx).nonzero()
-    row, col = int(positions[0][0]), int(positions[1][0])
-    channel_data = image[row::2, col::2]
-
-    top = sizes.top_margin // 2
-    left = sizes.left_margin // 2
-    h = sizes.height // 2
-    w = sizes.width // 2
-    channel_data = channel_data[top:top + h, left:left + w]
-
-    half = 87
-    channel_data = channel_data[h // 2 - half:h // 2 + half, w // 2 - half:w // 2 + half]
-    return channel_data - black[ch_idx]
-
-
-def sample_channel_median(path, ch_idx):
-    """
-    Trimmed median (5th–95th percentile) of the center 174x174 Bayer channel patch.
-    Use for filmbase neutrals — robust to dust and bright defects.
-    """
-    import numpy as np
-    data = _load_channel_patch(path, ch_idx)
-    lo, hi = np.percentile(data, [5, 95])
-    trimmed = data[(data >= lo) & (data <= hi)]
-    return float(np.median(trimmed))
-
-
-def sample_channel_max(path, ch_idx, percentile=99):
-    """
-    99th-percentile of the center 174x174 Bayer channel patch.
-    Use for clipping detection — matches RawDigger MAX-with-0%-OvExp behavior.
-    """
-    import numpy as np
-    data = _load_channel_patch(path, ch_idx)
-    return float(np.percentile(data, percentile))

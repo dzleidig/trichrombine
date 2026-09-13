@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trichrom"
 version = "0.1.0"
-description = "RGB film scanning via Scanlight + Sony A7III"
+description = "Trichromatic (3-shot) RGB film scanning via Scanlight + Sony A7R V"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
@@ -19,22 +19,23 @@ dependencies = [
     "tifffile",
     "pyexiv2",
     "pyserial",
+    "scipy",     # leader-density masking, flat-field smoothing
 ]
 
 [project.scripts]
-trichrom-calibrate = "trichrom.calibrate_rgb:main"
-trichrom-measure-crosstalk = "trichrom.measure_crosstalk:main"
-trichrom-correct = "trichrom.correct_crosstalk:main"
-trichrom-capture = "trichrom.legacy.rgb_capture:main"
-trichrom-combine = "trichrom.legacy.combine_rgb_scans:main"
+trichrom-scan = "trichrom.scan:main"
 
 [project.optional-dependencies]
-legacy = [
-    "scipy",     # LCC map smoothing (required for trichrom-combine)
+gphoto = [
+    "gphoto2",   # only for --camera-backend gphoto2; the default drives Capture One
 ]
 dev = [
     "pytest>=7.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
