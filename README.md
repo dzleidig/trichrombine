@@ -10,6 +10,7 @@ time.
 - [Installation](#installation)
 - [Workflow](#workflow)
 - [Development](#development)
+- [License](#license)
 
 ## Background
 
@@ -182,3 +183,7 @@ selection, flat-field build, session state — and run in under a second with no
 hardware. `trichrom-scan --dry-run` walks the whole flow (calibration and capture
 loop) without touching the camera or the light. `CLAUDE.md` documents the
 architecture and the items still unverified against the rig.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
