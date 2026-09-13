@@ -39,7 +39,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .lib import captureone, gphoto, session_state
+from .lib import captureone, gphoto, session_state, sessionlog
 from .lib.flatfield import FLAT_MAX, FLAT_TARGET, build_channel_flat, flat_level
 from .lib.leader import measure_leader_level
 from .lib.merge_tri import merge_triplet
@@ -605,6 +605,14 @@ def main():
         session_dir = session_state.resolve_resume_dir(args.session_dir)
         state = session_state.load_session(session_dir)
     args.session_dir = session_dir
+
+    # From here on everything printed is mirrored into session.log. Started as early as
+    # the session dir is known, and skipped under --dry-run, which writes nothing else to
+    # the session either. Never stopped: the interpreter prints sys.exit messages and
+    # tracebacks after main() has unwound, so restoring the streams would drop exactly
+    # the line that explains why a roll stopped.
+    if not args.dry_run:
+        sessionlog.start(session_dir)
 
     for field, value in (('film_stock', args.film_stock), ('roll_id', args.roll_id), ('date', args.date)):
         if value:

@@ -418,6 +418,25 @@ this body, and the threshold's real job is separating one-LED light from the
 white-equivalent preview level, which sits near 1. The measured ratio goes into the
 sidecar, so a roll drifting toward 1 is visible after the fact.
 
+**`lib/sessionlog.py`** — mirrors everything the run prints into `session.log`, beside
+`session.json`, appending so a session dir accumulates its failed calibrations and
+retries as evidence about one roll.
+
+A stream tee rather than the `logging` module, because the requirement is a transcript
+rather than structured diagnostics. `logging` only records what is deliberately routed
+through it, so it would miss any `print` not converted, every `input()` prompt, output
+from rawpy or scipy, and — the decisive one — `sys.exit("...")` messages and tracebacks,
+which the interpreter writes to stderr itself. Those are how most failed runs end, so a
+`logging`-based log would record everything except why the roll stopped. The two compose
+rather than compete: a `logging` StreamHandler on stdout would flow into the file for
+free if structure is ever wanted.
+
+Nothing restores the streams. The interpreter prints `SystemExit` messages and tracebacks
+after `main()` has unwound, so restoring on the way out drops exactly the line that
+explains the abort — measured: restoring in a `finally` loses it, leaving the tee keeps
+it. Every write is flushed, so the process ending takes nothing with it. Skipped under
+`--dry-run`, which writes nothing else to the session either.
+
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
 pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,
 3=G2 (second green in RGGB); black/white levels and active sensor area margins are
