@@ -176,6 +176,23 @@ roll. Halving and looking again recovers the real number (power 90 reads 68.6%, 
 clamps at 255 and lands near 30%: legal, dim, and now said out loud, because the only
 remaining levers are aperture and shutter.
 
+The flats' shutter is a free variable, and that is worth stating because it looks like
+it should not be. Flats run before the exposure pass has chosen a scanning shutter, so
+they are shot at whatever the camera happens to be on, or at `--flat-shutter`. That is
+legitimate: the flat is peak-normalized, so only its *shape* is ever applied, and shape
+is illumination falloff times lens vignetting — neither depends on shutter speed. What
+the shutter does decide is how well exposed the flat is, which matters because LED power
+alone is not always enough. On the real rig red needs power ~595 to reach `FLAT_TARGET`
+and clamps at 255 every run, so a slower shutter is the only lever left. Whichever
+shutter was used is recorded in `session.json` under `flat_capture`, since it is the
+first number worth knowing when a flat comes back clipped or dim.
+
+`--flat-shutter` defaults to leaving the camera alone, deliberately: whether Capture One
+accepts a shutter write is still unverified (Open items, item 4), so the default path
+touches nothing. `build_channel_flat()` takes `led_at_max` so its too-dark message can
+name a lever the operator can actually use — with the LED already at 255, "raise
+`--flat-brightness`" is advice that cannot be followed.
+
 `capture_flats()` blocks on `input()` before any of that, and the *order* is the point:
 it used to print "remove the film holder ... before continuing" and then continue, so
 the flats were shot through the holder and its edges went into the correction divided

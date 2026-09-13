@@ -45,23 +45,24 @@ def rig(monkeypatch):
 
 
 def _probe(rig, ch, start=180):
+    """Returns (power chosen, level the flat will land at, whether the LED clamped)."""
     rig.channel = ch
-    args = SimpleNamespace(dry_run=False, flat_brightness=start)
-    chosen = scan._probe_flat_power(None, None, args, ch)
-    return chosen, rig.response[ch] * chosen     # power chosen, level the flat will land at
+    args = SimpleNamespace(dry_run=False, flat_brightness=start, flat_shutter=None)
+    chosen, led_at_max = scan._probe_flat_power(None, None, args, ch)
+    return chosen, rig.response[ch] * chosen, led_at_max
 
 
 def test_backs_off_from_a_saturated_probe(rig):
     """The regression: green saturates at the starting power, so one reading is not
     enough to compute from."""
-    chosen, landed = _probe(rig, 'G')
+    chosen, landed, _ = _probe(rig, 'G')
     assert len(rig.powers) > 1, "accepted a saturated reading without re-probing"
     assert FLAT_MIN < landed < FLAT_MAX, f"flat would land at {landed:.0%} and be rejected"
 
 
 def test_the_saturated_case_lands_near_target(rig):
     """Not merely legal — actually near FLAT_TARGET, which is the point of probing."""
-    _, landed = _probe(rig, 'G')
+    _, landed, _ = _probe(rig, 'G')
     assert landed == pytest.approx(scan.FLAT_TARGET, abs=0.05)
 
 
@@ -75,9 +76,10 @@ def test_clamps_at_maximum_power_without_failing(rig):
     """Red cannot reach target at any available power — it needs ~600. That must clamp
     to 255 and carry on, not abort: a dim flat is still usable, and the operator's
     remaining levers are aperture and shutter."""
-    chosen, landed = _probe(rig, 'R')
+    chosen, landed, at_max = _probe(rig, 'R')
     assert chosen == 255
     assert landed > FLAT_MIN, "clamped flat must still clear the too-dark guard"
+    assert at_max, "the caller needs to know the LED clamped, or its advice is unfollowable"
 
 
 def test_gives_up_rather_than_probing_forever(rig, monkeypatch):
@@ -95,5 +97,5 @@ def test_black_probe_exits(rig):
 
 
 def test_dry_run_returns_without_reading_anything(rig):
-    args = SimpleNamespace(dry_run=True, flat_brightness=180)
-    assert scan._probe_flat_power(None, None, args, 'G') == 180
+    args = SimpleNamespace(dry_run=True, flat_brightness=180, flat_shutter=None)
+    assert scan._probe_flat_power(None, None, args, 'G') == (180, False)

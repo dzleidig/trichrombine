@@ -125,7 +125,11 @@ calibration before anything else:
    the same drift, just in the other direction.
 2. **Flat fields** — you're prompted to remove the film holder (bare light only)
    and it waits for you; flats shot through the holder would bake its edges and
-   vignetting into every frame's correction.
+   vignetting into every frame's correction. Exposure is set per channel from a probe
+   frame. The shutter is left wherever the camera has it unless `--flat-shutter` says
+   otherwise — a flat is peak-normalized, so only its *shape* is applied, and shape is
+   illumination falloff times lens vignetting, neither of which depends on shutter
+   speed. Whatever shutter was used is recorded in `session.json`.
    One probe frame per channel sets the LED power (shutter speed hasn't been
    chosen yet at this point), then several exposures at that power are averaged
    into a per-channel flat-field map, used to correct light falloff for the rest
@@ -243,6 +247,7 @@ Defaults are usually fine.
 |---|---|---|
 | `--start-power N` | `200` | LED power (0-255) for the warm-up cycle and the channel-balance pass. Balance only scales channels *down* from here, so it acts as the ceiling. |
 | `--flat-brightness N` | `180` | Starting power for the flat-field probe; the probe then scales it per channel to hit the target exposure. |
+| `--flat-shutter SPEED` | camera's current | Shutter speed (e.g. `1/4`) set before the flat pass. Flats are shot before a scanning shutter exists, and only the flat's *shape* is used, so this may differ from the scanning shutter. Reach for it when the LED clamps at 255 and the flat is still dim. |
 | `--flat-shots N` | `6` | Exposures averaged per channel when building each flat. |
 | `--skip-flats` | off | Reuse the flats already in the session dir. |
 | `--warmup-seconds N` | `300` | How long to cycle R/G/B before calibrating. |

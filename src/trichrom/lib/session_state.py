@@ -29,6 +29,7 @@ def new_session(session_dir, film_stock, roll_id, date=None):
         'date': date or time.strftime('%Y-%m-%d'),
         'calibration': None,
         'flats': None,
+        'flat_capture': None,
         'frames': [],
     }
     save_session(session_dir, state)
@@ -93,8 +94,23 @@ def set_calibration(state, channel_levels, shutter_speed, peaks):
     }
 
 
-def set_flats(state, flat_paths):
+def set_flats(state, flat_paths, shutter_speed=None):
+    """
+    Record the flat-field maps and the exposure they were shot at.
+
+    The shutter speed is provenance, not a setting anything reads back: flats are
+    captured before the exposure pass has chosen a shutter, so they are shot at
+    whatever the camera happened to be on (or at --flat-shutter). That is legitimate —
+    a flat is peak-normalized, so only its *shape* is used, and shape is illumination
+    falloff times lens vignetting, neither of which depends on shutter speed. But the
+    shutter does decide how well exposed the flat is, so when a flat turns out clipped
+    or too dark it is the first number worth knowing, and without this it was nowhere.
+    """
     state['flats'] = {ch: str(p) for ch, p in flat_paths.items()}
+    state['flat_capture'] = {
+        'captured_at': time.time(),
+        'shutter_speed': shutter_speed,
+    }
 
 
 def record_frame(state, frame_num, filenames, output_path, status):

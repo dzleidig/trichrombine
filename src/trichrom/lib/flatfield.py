@@ -26,7 +26,7 @@ def _usable_fraction(plane, black, white_level):
 
 
 def build_channel_flat(raw_images, pattern, channel_indices, black_levels, sizes,
-                       white_level, smooth_size=201):
+                       white_level, smooth_size=201, led_at_max=False):
     """
     Average several black-subtracted raw exposures of one LED channel, smooth out
     grain, and normalize so the peak is 1.0.
@@ -38,6 +38,13 @@ def build_channel_flat(raw_images, pattern, channel_indices, black_levels, sizes
 
     Refuses a flat that is clipped or too dark rather than returning one that
     would quietly degrade every frame of the roll.
+
+    led_at_max says the caller's probe already clamped LED power at 255, which decides
+    what the too-dark message can honestly tell the operator to do: with the light
+    maxed out, "turn the light up" is advice they cannot follow, and the only levers
+    left are exposure ones — a slower shutter or a wider aperture. Those are free to
+    use here: the flat is peak-normalized, so only its *shape* (illumination falloff
+    times lens vignetting) is applied, and neither of those depends on shutter speed.
     """
     planes = [
         crop_half_res(extract_led_channel_plane(image, pattern, channel_indices, black_levels), sizes)
@@ -51,9 +58,16 @@ def build_channel_flat(raw_images, pattern, channel_indices, black_levels, sizes
             f"Flat is clipping ({level:.0%} of usable range) — lower --flat-brightness. "
             f"A clipped flat has a flat-topped falloff and under-corrects the whole roll.")
     if level <= FLAT_MIN:
+        if led_at_max:
+            remedy = ("LED power is already at its 255 maximum, so the remaining levers "
+                      "are exposure: slow the shutter (--flat-shutter) or open the aperture")
+        else:
+            remedy = ("raise --flat-brightness; if LED power is already at its 255 maximum, "
+                      "slow the shutter (--flat-shutter) or open the aperture instead")
         raise ValueError(
-            f"Flat is too dark ({level:.0%} of usable range) — raise --flat-brightness. "
-            f"Its read noise would be divided into every frame.")
+            f"Flat is too dark ({level:.0%} of usable range) — {remedy}. "
+            f"Its read noise would be divided into every frame. The flats' shutter is "
+            f"free to differ from the one scanning runs at: only the flat's shape is used.")
 
     flat = uniform_filter(averaged, size=smooth_size)
     peak = flat.max()
