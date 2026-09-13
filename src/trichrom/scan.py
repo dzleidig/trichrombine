@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 
 from .lib import captureone, gphoto, session_state
-from .lib.flatfield import build_channel_flat
+from .lib.flatfield import FLAT_TARGET, build_channel_flat, flat_level
 from .lib.leader import measure_leader_level
 from .lib.merge_tri import merge_triplet
 from .lib.rawio import crop_half_res, extract_led_channel_plane, read_raw
@@ -60,8 +60,14 @@ CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
 # --------------------------------------------------------------------------
 
 def wait_for_settle(path, timeout=10.0, min_age_seconds=SETTLE_SECONDS):
-    """Wait for the ARW's size to stop changing before reading it — the classic
-    source of intermittent corruption is reading a half-written raw."""
+    """
+    Wait for the ARW's size to stop changing before reading it — the classic
+    source of intermittent corruption is reading a half-written raw.
+
+    Returns False if it never settled. That must not be treated as success: a
+    timeout here means the file is most likely still being written, which is
+    exactly the case this guard exists to catch.
+    """
     deadline = time.monotonic() + timeout
     last_size = -1
     while time.monotonic() < deadline:
@@ -71,9 +77,10 @@ def wait_for_settle(path, timeout=10.0, min_age_seconds=SETTLE_SECONDS):
             time.sleep(0.1)
             continue
         if stat.st_size == last_size and time.time() - stat.st_mtime >= min_age_seconds:
-            return
+            return True
         last_size = stat.st_size
         time.sleep(0.2)
+    return False
 
 
 def _shoot(scanlight, camera, args, ch, level):
@@ -100,7 +107,21 @@ def _shoot(scanlight, camera, args, ch, level):
     # writing in place is before the ~100MB raw is finished. Settle here so every
     # consumer — calibration, flats, and the capture loop alike — reads a complete
     # file, and so only one new ARW exists before the next channel fires.
-    wait_for_settle(path)
+    if not wait_for_settle(path):
+        print(f"  WARNING: {filename} was still being written after the settle timeout — "
+              f"skipping it rather than reading a partial raw.")
+        return None
+    return path
+
+
+def _require_shot(scanlight, camera, args, ch, level, what):
+    """_shoot for the calibration path, where a missed frame is fatal — better a
+    clear message than a None deref several frames deep in rawpy."""
+    path = _shoot(scanlight, camera, args, ch, level)
+    if path is None and not args.dry_run:
+        sys.exit(
+            f"Calibration aborted: no usable {what} frame for channel {ch}.\n"
+            f"Check the tether and that captures are landing in {args.watch_dir}.")
     return path
 
 
@@ -118,12 +139,41 @@ def _measure_channel_level(path, ch, flats):
 # Calibration
 # --------------------------------------------------------------------------
 
+def _probe_flat_power(scanlight, camera, args, ch):
+    """
+    Shoot one bare-light probe and scale LED power so the flat lands near
+    FLAT_TARGET of usable range.
+
+    Flats are captured before the exposure pass has set a shutter speed — they
+    have to be, since the leader readings that drive that pass are themselves
+    flat-corrected. So LED power is the lever here, not shutter. Direct ratio,
+    no search loop: LED output is roughly linear with drive current.
+    """
+    path = _require_shot(scanlight, camera, args, ch, args.flat_brightness, 'flat-field probe')
+    if args.dry_run:
+        return args.flat_brightness
+
+    raw = read_raw(path)
+    level = flat_level(raw['image'], raw['pattern'], CHANNEL_BAYER_INDICES[ch],
+                       raw['black_level_per_channel'], raw['sizes'], raw['white_level'])
+    if level <= 0:
+        sys.exit(f"Flat probe for channel {ch} came back black — check the LED "
+                 f"and that the film holder is off.")
+
+    power = max(1, min(255, round(args.flat_brightness * FLAT_TARGET / level)))
+    print(f"  [{ch}] probe at power {args.flat_brightness} read {level:.0%} of usable "
+          f"range -> shooting flats at power {power}")
+    return power
+
+
 def capture_flats(scanlight, camera, args, session_dir):
     """
     Average several exposures per channel with the holder off (bare light) to
-    build per-channel flat-field maps. Same aperture/distance as scanning, and
-    within about a stop of the frame exposures — LED-only, camera does not need
-    a settled shutter speed yet since flats are shot before exposure targeting.
+    build per-channel flat-field maps. Same aperture and distance as scanning.
+
+    Exposure is set per channel from a probe frame rather than assumed: a clipped
+    flat under-corrects falloff across the whole roll and a dark one divides its
+    read noise into every frame, and neither announces itself in the output.
     """
     print("=== Flat fields ===")
     print("Remove the film holder — bare light only — before continuing.\n")
@@ -132,20 +182,22 @@ def capture_flats(scanlight, camera, args, session_dir):
 
     flat_paths = {}
     for ch in CHANNELS:
-        print(f"[{ch}] Shooting {args.flat_shots} flat exposures at brightness {args.flat_brightness}...")
-        raws, pattern, black, sizes = [], None, None, None
+        power = _probe_flat_power(scanlight, camera, args, ch)
+        print(f"[{ch}] Shooting {args.flat_shots} flat exposures at power {power}...")
+        raws, pattern, black, sizes, white_level = [], None, None, None, None
         for _ in range(args.flat_shots):
-            path = _shoot(scanlight, camera, args, ch, args.flat_brightness)
+            path = _require_shot(scanlight, camera, args, ch, power, 'flat-field')
             if args.dry_run:
                 continue
             raw = read_raw(path)
             raws.append(raw['image'])
-            pattern, black, sizes = raw['pattern'], raw['black_level_per_channel'], raw['sizes']
+            pattern, black, sizes, white_level = (raw['pattern'], raw['black_level_per_channel'],
+                                                  raw['sizes'], raw['white_level'])
 
         if args.dry_run:
             continue
 
-        flat = build_channel_flat(raws, pattern, CHANNEL_BAYER_INDICES[ch], black, sizes)
+        flat = build_channel_flat(raws, pattern, CHANNEL_BAYER_INDICES[ch], black, sizes, white_level)
         flat_path = flats_dir / f'{ch}.npy'
         np.save(flat_path, flat)
         flat_paths[ch] = flat_path
@@ -160,7 +212,7 @@ def balance_channels(scanlight, camera, args, flats):
     print("=== Channel balance ===\n")
     levels = {}
     for ch in CHANNELS:
-        path = _shoot(scanlight, camera, args, ch, args.start_power)
+        path = _require_shot(scanlight, camera, args, ch, args.start_power, 'channel-balance')
         if args.dry_run:
             levels[ch] = 1.0
             continue
@@ -192,7 +244,7 @@ def adjust_exposure(scanlight, camera, args, powers, flats):
     for attempt in range(1, args.max_exposure_iterations + 1):
         peaks = {}
         for ch in CHANNELS:
-            path = _shoot(scanlight, camera, args, ch, powers[ch])
+            path = _require_shot(scanlight, camera, args, ch, powers[ch], 'exposure-targeting')
             if args.dry_run:
                 peaks[ch] = target_fraction
                 continue
