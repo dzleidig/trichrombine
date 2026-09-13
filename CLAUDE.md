@@ -221,8 +221,8 @@ contamination from the others to unpick, but it is still interpolation. Which on
 produced a file is recorded in the TIFF metadata and the sidecar; that is provenance,
 not trivia, since it decides what the file can honestly be compared against.
 
-Measured ~4s per frame at full resolution against ~0.6s at half on an Apple-silicon
-Mac, TIFF write included, for a 61MP frame. Note that a CI/container box measured
+Measured ~3s per frame at full resolution against ~0.6s at half on an Apple-silicon
+Mac, TIFF write included and channel verification included, for a 61MP frame. Note that a CI/container box measured
 roughly 3x slower — quote the machine along with the number.
 
 The per-channel drift peak is taken from the measured photosites, before any

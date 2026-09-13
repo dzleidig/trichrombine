@@ -189,7 +189,7 @@ do with that, and `--resolution` picks between them.
 |---|---|---|
 | Output | 9504 × 6336 (60MP) | 4752 × 3168 (15MP) |
 | Each pixel | measured where a photosite sat, interpolated between | every value measured, nothing inferred |
-| Merge time per frame | ~4s | ~0.6s |
+| Merge time per frame | ~3s | ~0.6s |
 
 `full` reconstructs each channel from its own measured sites. Because each channel
 comes from its own exposure there is no cross-channel contamination to fight, so
