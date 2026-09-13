@@ -2,7 +2,7 @@
 
 import numpy as np
 import rawpy
-from scipy.interpolate import RectBivariateSpline
+from scipy.ndimage import spline_filter
 
 # Cubic spline for the full-resolution path. Spline interpolation passes exactly
 # through its samples, so every photosite that was really read keeps its measured
@@ -24,10 +24,24 @@ INTERPOLATION_ORDER = 3
 # right where the real data starts.
 INTERPOLATION_PAD = 12
 
-# Output rows evaluated per pass. The spline is fitted once and evaluated in stripes
-# purely to bound memory: a whole 61MP plane comes back from the evaluator as float64
-# (~480MB) before it is narrowed to float32, and three channels are live at once.
-EVAL_ROW_BLOCK = 512
+# Because the scale factor is exactly 2, every output sample lands either exactly on
+# a coefficient or exactly halfway between two — so evaluation is not a general
+# resample at all, it is two fixed kernels. These are the B-spline basis sampled at
+# those two positions, with the index of their first tap relative to the base:
+#
+#   cubic, integer  B3(-1, 0, 1)            = [1, 4, 1] / 6
+#   cubic, half     B3(-1.5, -.5, .5, 1.5)  = [1, 23, 23, 1] / 48
+#   linear          needs no prefilter, since its coefficients are the samples
+#
+# Evaluating these as separable slice arithmetic over the spline coefficients beats
+# handing the job to a general evaluator by a wide margin: `RectBivariateSpline`'s fit
+# alone cost more than this whole routine, and `map_coordinates` additionally wanted a
+# meshgrid of two float64 arrays the size of the output — near a gigabyte at 61MP.
+KERNELS = {
+    1: ((np.array([1.0]), 0), (np.array([0.5, 0.5]), 0)),
+    3: ((np.array([1.0, 4.0, 1.0]) / 6.0, -1),
+        (np.array([1.0, 23.0, 23.0, 1.0]) / 48.0, -1)),
+}
 
 
 def read_raw(path):
@@ -100,26 +114,56 @@ def upsample_bayer_plane(plane, row_offset, col_offset, out_shape, order=INTERPO
     diagonally — chromatic fringing baked into every frame, with nothing to show for
     it in any error message.
 
-    Evaluated as a tensor-product spline rather than through `map_coordinates`,
-    because the mapping is separable — every output row wants the same column
-    coordinates. Handing a regular grid to a scattered-point evaluator costs a
-    meshgrid of two float64 arrays the size of the output (near a gigabyte at 61MP)
-    and runs about seven times slower for identical results.
+    Evaluation exploits the fixed 2x scale: each output sample sits either on a
+    spline coefficient or exactly between two, so it is separable slice arithmetic
+    with the two kernels in `KERNELS` rather than a general resampler. See there for
+    why that matters — the general evaluators spend most of their time on machinery
+    this mapping does not need.
     """
     # Odd reflection needs at least one real sample to mirror through per padded one.
     pad = max(0, min(INTERPOLATION_PAD, min(plane.shape) - 1))
     padded = np.pad(plane, pad, mode='reflect', reflect_type='odd') if pad else plane
 
+    # Prefilter to B-spline coefficients. Linear needs none: its coefficients are the
+    # samples, which is also why it cannot overshoot.
+    coeffs = (spline_filter(padded, order=order, mode='mirror', output=np.float32)
+              if order > 1 else padded.astype(np.float32, copy=False))
+
     h, w = out_shape
-    rows = (np.arange(h, dtype=np.float64) - row_offset) / 2.0 + pad
-    cols = (np.arange(w, dtype=np.float64) - col_offset) / 2.0 + pad
+    # Narrow axis first, so the intermediate is the smaller of the two.
+    coeffs = _upsample_axis(coeffs, col_offset, w, pad, order, axis=1)
+    return _upsample_axis(coeffs, row_offset, h, pad, order, axis=0)
 
-    spline = RectBivariateSpline(
-        np.arange(padded.shape[0]), np.arange(padded.shape[1]), padded,
-        kx=min(order, padded.shape[0] - 1), ky=min(order, padded.shape[1] - 1), s=0)
 
-    out = np.empty((h, w), dtype=np.float32)
-    for start in range(0, h, EVAL_ROW_BLOCK):
-        stop = min(start + EVAL_ROW_BLOCK, h)
-        out[start:stop] = spline(rows[start:stop], cols, grid=True)
+def _upsample_axis(coeffs, offset, out_len, pad, order, axis):
+    """One separable pass: double `axis` from spline coefficients to output samples.
+
+    Output index `y` reads coordinate `(y - offset) / 2 + pad`, so the parity of
+    `y - offset` alone decides which of the two kernels applies. Each parity picks out
+    a contiguous run of coefficients, which is why this is plain slicing rather than
+    gather-indexing.
+    """
+    shape = list(coeffs.shape)
+    shape[axis] = out_len
+    out = np.empty(shape, dtype=np.float32)
+
+    for parity, (kernel, first_tap) in enumerate(KERNELS[order]):
+        # Integer phase where (y - offset) is even, half phase where it is odd.
+        start = (offset + parity) % 2
+        count = (out_len - start + 1) // 2
+        if count <= 0:
+            continue
+        # Base coefficient index for the first output sample of this phase.
+        base = (start - offset - parity) // 2 + pad
+
+        acc = None
+        for k, weight in enumerate(kernel):
+            lo = base + first_tap + k
+            chunk = coeffs[lo:lo + count] if axis == 0 else coeffs[:, lo:lo + count]
+            acc = weight * chunk if acc is None else acc + weight * chunk
+
+        if axis == 0:
+            out[start::2] = acc
+        else:
+            out[:, start::2] = acc
     return out

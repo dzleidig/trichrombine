@@ -197,7 +197,13 @@ contamination from the others to unpick, but it is still interpolation. Which on
 produced a file is recorded in the TIFF metadata and the sidecar; that is provenance,
 not trivia, since it decides what the file can honestly be compared against.
 
-Measured ~18s per frame at full resolution against ~3s at half, on a 61MP frame.
+Measured ~4s per frame at full resolution against ~0.6s at half on an Apple-silicon
+Mac, TIFF write included, for a 61MP frame. Note that a CI/container box measured
+roughly 3x slower — quote the machine along with the number.
+
+The per-channel drift peak is taken from the measured photosites, before any
+reconstruction. That keeps it meaning the same thing at either `--resolution` (so
+peaks stay comparable across a roll shot both ways) and reads a quarter as much data.
 
 ```mermaid
 flowchart LR
@@ -277,11 +283,20 @@ incidental, each found by a test that failed first:
   the edge value. Padding with `reflect_type='odd'` continues the edge gradient and
   fixes both; padding with `'edge'` does not — a constant extension makes the spline
   bend exactly where the real data starts.
-- **Tensor-product evaluation.** The mapping is separable, so it goes through
-  `RectBivariateSpline(...)(rows, cols, grid=True)` rather than `map_coordinates`.
-  Handing a regular grid to a scattered-point evaluator costs a meshgrid of two float64
-  arrays the size of the output — near a gigabyte at 61MP — and ran ~7× slower for
-  results identical to 1e-16.
+- **Two fixed kernels, not a general resampler.** The scale factor is exactly 2, so
+  every output sample lands either on a spline coefficient or exactly halfway between
+  two. Evaluation is therefore `KERNELS` — the B-spline basis at those two positions —
+  applied as separable slice arithmetic over `spline_filter` coefficients. Both general
+  evaluators were tried and both lost badly: `map_coordinates` wants a meshgrid of two
+  float64 arrays the size of the output (near a gigabyte at 61MP), `RectBivariateSpline`
+  spends more time in its fit than this whole routine takes, and `affine_transform` —
+  which looks like the natural fit — was slower than either. All agree to ~5e-7.
+
+  A caution for anyone testing this: a **linear** ramp is invariant under the
+  approximating filter `[1, 4, 1] / 6`, so a reconstruction that skipped the spline
+  prefilter entirely still reproduces a ramp perfectly. Only a curved field separates
+  interpolation from approximation, which is what `test_measured_sites_survive_a_curved_field`
+  is for.
 
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
 pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,

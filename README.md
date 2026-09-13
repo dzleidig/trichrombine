@@ -183,12 +183,17 @@ do with that, and `--resolution` picks between them.
 |---|---|---|
 | Output | 9504 × 6336 (60MP) | 4752 × 3168 (15MP) |
 | Each pixel | measured where a photosite sat, interpolated between | every value measured, nothing inferred |
-| Merge time per frame | ~18s | ~3s |
+| Merge time per frame | ~4s | ~0.6s |
 
 `full` reconstructs each channel from its own measured sites. Because each channel
 comes from its own exposure there is no cross-channel contamination to fight, so
 this is a cleaner reconstruction than demosaicing a single Bayer frame — but it is
 still interpolation, and the extra pixels are inferred rather than measured.
+
+Merge timings are measured on an Apple-silicon Mac, including writing the TIFF
+(361MB at full resolution against 90MB at half); a slower machine scales both.
+Per-channel drift peaks are read from the measured photosites either way, so they
+mean the same thing at both settings and stay comparable across a roll.
 
 `half` is the conservative option: one output pixel per photosite that was really
 read. Worth choosing if you want a file where every number came off the sensor, or

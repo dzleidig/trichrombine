@@ -57,8 +57,21 @@ def _ramp():
     return (100.0 * y + 50.0 * x).astype(np.float32)
 
 
+def _curved():
+    """A field with curvature in both axes.
+
+    The ramp above cannot catch everything: a linear signal is invariant under the
+    *approximating* form of the B-spline filter, `[1, 4, 1] / 6`, so a reconstruction
+    that skipped the prefilter entirely would reproduce a ramp perfectly and look
+    correct. Only curvature separates interpolation from approximation.
+    """
+    y, x = np.mgrid[0:FULL_H, 0:FULL_W]
+    return (2000.0 + 1500.0 * np.sin(y / 7.0) * np.cos(x / 5.0)).astype(np.float32)
+
+
 def _fields(raw, full_resolution=True):
-    return {ch: merge_tri._channel_field(raw, ch, None, full_resolution) for ch in 'RGB'}
+    """_channel_field returns (plane, measured peak); these tests are about the plane."""
+    return {ch: merge_tri._channel_field(raw, ch, None, full_resolution)[0] for ch in 'RGB'}
 
 
 def test_full_resolution_output_matches_the_active_area():
@@ -149,6 +162,21 @@ def test_flats_from_an_existing_session_still_apply():
     using them as-is rather than demanding they be rebuilt."""
     raw = _raw_from_field(np.full((FULL_H, FULL_W), 0.4 * USABLE, dtype=np.float32))
     half_flat = np.full((ACTIVE_H // 2, ACTIVE_W // 2), 0.5, dtype=np.float32)
-    plane = merge_tri._channel_field(raw, 'R', half_flat, full_resolution=True)
+    plane, _ = merge_tri._channel_field(raw, 'R', half_flat, full_resolution=True)
     assert plane.shape == (ACTIVE_H, ACTIVE_W)
     assert np.allclose(plane, 0.8, atol=1e-5)  # 0.4 / 0.5
+
+
+def test_measured_sites_survive_a_curved_field():
+    """Interpolation must pass through its samples even where the signal bends —
+    the property a skipped spline prefilter would quietly lose."""
+    field = _curved()
+    out = _fields(_raw_from_field(field))
+    expected = field[TOP:TOP + ACTIVE_H, LEFT:LEFT + ACTIVE_W] / USABLE
+
+    for ch in 'RB':  # single-sub-plane channels: the site value is the whole value
+        (_, r, c), = SITES[ch]
+        ys = np.arange((r - TOP) % 2, ACTIVE_H, 2)
+        xs = np.arange((c - LEFT) % 2, ACTIVE_W, 2)
+        got, want = out[ch][np.ix_(ys, xs)], expected[np.ix_(ys, xs)]
+        assert np.allclose(got, want, atol=1e-5), f"{ch}: measured sites not preserved"

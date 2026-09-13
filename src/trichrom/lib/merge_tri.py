@@ -20,8 +20,8 @@ import tifffile
 
 from .flatfield import apply_flat
 from .icc import build_linear_prophoto_icc
-from .rawio import (INTERPOLATION_ORDER, active_site_offsets, crop_half_res, extract_bayer_channel,
-                    extract_led_channel_plane, read_raw, upsample_bayer_plane)
+from .rawio import (INTERPOLATION_ORDER, active_site_offsets, crop_half_res,
+                    extract_bayer_channel, read_raw, upsample_bayer_plane)
 from .scanner import CHANNEL_BAYER_INDICES
 
 _ICC_PROFILE = None
@@ -36,8 +36,8 @@ def _icc_profile():
 
 def _channel_field(raw, ch, flat, full_resolution):
     """
-    Normalized, flat-corrected signal for one LED channel, as a fraction of usable
-    range (white_level - black_level).
+    Normalized, flat-corrected signal for one LED channel, plus its drift peak, as a
+    fraction of usable range (white_level - black_level).
 
     Half resolution keeps one output pixel per measured photosite: nothing is
     interpolated, and every value in the result was really read off the sensor.
@@ -58,28 +58,37 @@ def _channel_field(raw, ch, flat, full_resolution):
     """
     indices = CHANNEL_BAYER_INDICES[ch]
     black = raw['black_level_per_channel']
+    sizes = raw['sizes']
     scale = raw['white_level'] - black[indices[0]]
 
-    if not full_resolution:
-        plane = crop_half_res(
-            extract_led_channel_plane(raw['image'], raw['pattern'], indices, black), raw['sizes'])
-        plane = plane / scale
-        return apply_flat(plane, flat) if flat is not None else plane
-
-    sizes = raw['sizes']
-    out_shape = (sizes.height, sizes.width)
-    fields = []
+    # float32 throughout: a full-resolution plane off a 61MP sensor is ~240MB at
+    # single precision and twice that at double, and three channels plus
+    # interpolation scratch have to be live at once.
+    subs = []
     for idx in indices:
-        # float32 throughout: a full-resolution plane off a 61MP sensor is ~240MB
-        # at single precision and twice that at double, and three channels plus
-        # interpolation scratch have to be live at once.
         sub, row_off, col_off = extract_bayer_channel(raw['image'], raw['pattern'], idx)
         sub = crop_half_res(sub.astype(np.float32) - black[idx], sizes) / scale
         if flat is not None:
             sub = apply_flat(sub, flat)
-        fields.append(upsample_bayer_plane(sub, *active_site_offsets(row_off, col_off, sizes),
-                                           out_shape=out_shape))
-    return fields[0] if len(fields) == 1 else np.mean(fields, axis=0)
+        subs.append((sub, row_off, col_off))
+
+    measured = subs[0][0] if len(subs) == 1 else np.mean([s for s, _, _ in subs], axis=0)
+
+    # The drift peak comes from the measured samples rather than the finished plane.
+    # That keeps it meaning the same thing at either --resolution, so peaks stay
+    # comparable across a roll shot both ways — and it reads a quarter as much data.
+    peak = float(np.percentile(measured, 99))
+
+    if not full_resolution:
+        return measured, peak
+
+    out_shape = (sizes.height, sizes.width)
+    fields = [
+        upsample_bayer_plane(sub, *active_site_offsets(row_off, col_off, sizes),
+                             out_shape=out_shape)
+        for sub, row_off, col_off in subs
+    ]
+    return (fields[0] if len(fields) == 1 else np.mean(fields, axis=0)), peak
 
 
 def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
@@ -99,10 +108,10 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
         'B': read_raw(blue_path),
     }
 
-    planes = {ch: _channel_field(raws[ch], ch, flats[ch] if flats else None, full_resolution)
+    fields = {ch: _channel_field(raws[ch], ch, flats[ch] if flats else None, full_resolution)
               for ch in 'RGB'}
-
-    peaks = {ch: float(np.percentile(planes[ch], 99)) for ch in 'RGB'}
+    planes = {ch: field for ch, (field, _) in fields.items()}
+    peaks = {ch: peak for ch, (_, peak) in fields.items()}
 
     # Filled a channel at a time rather than stacked: at full resolution a stacked
     # float array of three 61MP channels is most of a gigabyte before it is scaled.
