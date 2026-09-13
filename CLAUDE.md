@@ -105,9 +105,20 @@ session → calibration → capture loop, plus `--resume` and `--recalibrate`) w
 touching hardware, so it catches wiring and argument regressions the unit tests can't
 see. Run it on both backends after changing anything in `scan.py`.
 
-Synthetic raw frames in tests should use **nonzero** sensor margins. Real bodies have
-them; zero-margin fixtures hide active-area crop mismatches, which is exactly the class
-of bug that passes here and breaks at the rig.
+Synthetic raw frames in tests should use **nonzero** sensor margins, so that an
+active-area crop mismatch cannot hide — that class of bug passes on a zero-margin
+fixture and breaks at the rig.
+
+Note though that the A7R V reports `top_margin=0, left_margin=0`, which is *not* what
+the fixtures assume. Its real geometry is `raw 6656x9728, height 6374, width 9566,
+crop_top_margin 20, crop_left_margin 32, crop_width 9504, crop_height 6336`. So the
+border rawpy expects you to trim lives in the `crop_*` fields, and the pipeline — which
+crops by `top_margin`/`left_margin` + `height`/`width` — keeps a 20-row, 32-column strip
+that Sony considers outside the frame. Self-consistent, since the flats are cropped the
+same way, and it only costs ~0.6% of border; but it means output is 6374x9566 rather
+than the 6336x9504 you would get from any other converter. Worth deciding deliberately
+rather than by accident. Both `crop_*` margins are even, so the Bayer phase survives
+either choice.
 
 When adding tests, check they actually catch a regression — break the thing on purpose
 and confirm the relevant test fails.
@@ -156,9 +167,19 @@ Flats come before both passes (`capture_flats`, holder off, bare light, averaged
 over `--flat-shots` exposures per channel), and that ordering is forced: the leader
 readings both passes depend on are themselves flat-corrected. Which means the flats
 are shot *before* a shutter speed exists, so LED power — not shutter — is the
-exposure lever for them. `_probe_flat_power()` shoots one bare-light frame per
-channel, reads it with `flat_level()`, and scales power by direct ratio to land near
-`FLAT_TARGET`; the real flats then follow at that power.
+exposure lever for them. `_probe_flat_power()` shoots a bare-light frame per channel, reads it with
+`flat_level()`, and scales power by direct ratio to land near `FLAT_TARGET`; the real
+flats then follow at that power.
+
+It re-probes when the reading comes back at or above `FLAT_MAX`, and that is not
+belt-and-braces. The ratio is only meaningful on an unclipped reading: a saturated frame
+reports 100% of usable range however far past full scale it truly is, so scaling from it
+under-corrects every time. On the first real run the green probe at power 180 was 99.93%
+clipped, reported 100%, and yielded power 126 — which produced a 96% flat and aborted the
+roll. Halving and looking again recovers the real number (power 90 reads 68.6%, giving
+92, which lands at 70%). Red on the same rig needs power ~600 to reach target, so it
+clamps at 255 and lands near 30%: legal, dim, and now said out loud, because the only
+remaining levers are aperture and shutter.
 
 `capture_flats()` blocks on `input()` before any of that, and the *order* is the point:
 it used to print "remove the film holder ... before continuing" and then continue, so

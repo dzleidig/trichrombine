@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 
 from .lib import captureone, gphoto, session_state
-from .lib.flatfield import FLAT_TARGET, build_channel_flat, flat_level
+from .lib.flatfield import FLAT_MAX, FLAT_TARGET, build_channel_flat, flat_level
 from .lib.leader import measure_leader_level
 from .lib.merge_tri import merge_triplet
 from .lib.rawio import crop_half_res, extract_led_channel_plane, read_raw, verify_channel
@@ -55,6 +55,9 @@ SETTLE_SECONDS = 1.0
 # How long each channel holds during warm-up. Roughly one capture's dwell, so the
 # board sees the same on/off rhythm it will during the roll.
 WARMUP_DWELL_SECONDS = 3.0
+# How many times the flat probe may back off before giving up. Each attempt halves LED
+# power, so four covers a 16x overshoot — well past anything the rig has shown.
+MAX_FLAT_PROBES = 4
 CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
 
 
@@ -171,29 +174,62 @@ def _measure_channel_level(path, ch, flats):
 
 def _probe_flat_power(scanlight, camera, args, ch):
     """
-    Shoot one bare-light probe and scale LED power so the flat lands near
-    FLAT_TARGET of usable range.
+    Probe with bare light and pick the LED power that lands the flat near FLAT_TARGET
+    of usable range.
 
-    Flats are captured before the exposure pass has set a shutter speed — they
-    have to be, since the leader readings that drive that pass are themselves
-    flat-corrected. So LED power is the lever here, not shutter. Direct ratio,
-    no search loop: LED output is roughly linear with drive current.
+    Flats are captured before the exposure pass has set a shutter speed — they have to
+    be, since the leader readings that drive that pass are themselves flat-corrected. So
+    LED power is the lever here, not shutter, and LED output is roughly linear with
+    drive current, which makes the correction a direct ratio rather than a search.
+
+    The loop exists only because that ratio needs an *unclipped* reading to be worth
+    anything. A saturated frame reports 100% of usable range however far past full scale
+    it truly is, so scaling from it always under-corrects — the first green probe on real
+    hardware came back 99.9% clipped at power 180, reported 100%, and yielded power 126
+    when ~92 was needed. Backing off and looking again costs one frame and is the only
+    way to recover the real number.
     """
-    path = _require_shot(scanlight, camera, args, ch, args.flat_brightness, 'flat-field probe')
-    if args.dry_run:
-        return args.flat_brightness
+    power = args.flat_brightness
+    for attempt in range(1, MAX_FLAT_PROBES + 1):
+        path = _require_shot(scanlight, camera, args, ch, power, 'flat-field probe')
+        if args.dry_run:
+            return power
 
-    raw = _read_verified(path, ch, 'flat-field probe')
-    level = flat_level(raw['image'], raw['pattern'], CHANNEL_BAYER_INDICES[ch],
-                       raw['black_level_per_channel'], raw['sizes'], raw['white_level'])
-    if level <= 0:
-        sys.exit(f"Flat probe for channel {ch} came back black — check the LED "
-                 f"and that the film holder is off.")
+        raw = _read_verified(path, ch, 'flat-field probe')
+        level = flat_level(raw['image'], raw['pattern'], CHANNEL_BAYER_INDICES[ch],
+                           raw['black_level_per_channel'], raw['sizes'], raw['white_level'])
+        if level <= 0:
+            sys.exit(f"Flat probe for channel {ch} came back black — check the LED "
+                     f"and that the film holder is off.")
 
-    power = max(1, min(255, round(args.flat_brightness * FLAT_TARGET / level)))
-    print(f"  [{ch}] probe at power {args.flat_brightness} read {level:.0%} of usable "
-          f"range -> shooting flats at power {power}")
-    return power
+        if level < FLAT_MAX:
+            break
+
+        # At or above the level a finished flat would be rejected at, the reading is
+        # pinned near full scale and its ratio cannot be trusted. Halve rather than
+        # scale by it: the true level may be any multiple of what was reported.
+        if power <= 1:
+            sys.exit(f"Flat probe for channel {ch} is saturated even at minimum LED "
+                     f"power. Stop down the aperture or shorten the shutter.")
+        print(f"  [{ch}] probe at power {power} reads {level:.0%} — saturated, "
+              f"halving to {max(1, power // 2)} and re-probing")
+        power = max(1, power // 2)
+    else:
+        sys.exit(f"Flat probe for channel {ch} still saturated after {MAX_FLAT_PROBES} "
+                 f"attempts. Stop down the aperture or shorten the shutter.")
+
+    wanted = round(power * FLAT_TARGET / level)
+    chosen = max(1, min(255, wanted))
+    print(f"  [{ch}] probe at power {power} read {level:.0%} of usable "
+          f"range -> shooting flats at power {chosen}")
+    if wanted > 255:
+        # The LED is already at maximum and the channel is still short of target. The
+        # flat is usable as long as build_channel_flat accepts it, but say so, because
+        # the operator's only remaining levers are aperture and shutter.
+        print(f"  [{ch}] NOTE: hitting {FLAT_TARGET:.0%} would need power {wanted}, above "
+              f"the 255 maximum. The flat will land near {level * 255 / power:.0%} of "
+              f"usable range — legal but dim. Open up or slow the shutter to do better.")
+    return chosen
 
 
 def capture_flats(scanlight, camera, args, session_dir):
