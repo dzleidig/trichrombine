@@ -115,10 +115,17 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
 
     # Filled a channel at a time rather than stacked: at full resolution a stacked
     # float array of three 61MP channels is most of a gigabyte before it is scaled.
+    # Scaled in place for the same reason — `clip(...) * 65535 + 0.5` would allocate
+    # two more full-size temporaries per channel. Safe because the planes are dead
+    # after this and the peaks were measured before it.
     h, w = planes['R'].shape
     image = np.empty((h, w, 3), dtype=np.uint16)
     for i, ch in enumerate('RGB'):
-        image[..., i] = (np.clip(planes[ch], 0, 1) * 65535 + 0.5).astype(np.uint16)
+        plane = planes[ch]
+        np.clip(plane, 0, 1, out=plane)
+        plane *= 65535.0
+        plane += 0.5
+        image[..., i] = plane
 
     tiff_meta = dict(meta)
     tiff_meta['peaks'] = peaks

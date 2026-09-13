@@ -156,14 +156,23 @@ def _upsample_axis(coeffs, offset, out_len, pad, order, axis):
         # Base coefficient index for the first output sample of this phase.
         base = (start - offset - parity) // 2 + pad
 
-        acc = None
+        # Accumulate straight into the output slice. The obvious
+        # `acc = w*chunk if acc is None else acc + w*chunk` allocates two full-size
+        # temporaries per tap and then copies the result in — seven arrays of up to
+        # 60MP for the four-tap kernel, which costs more than the arithmetic. One
+        # reusable scratch buffer and in-place adds do the same work.
+        target = out[start::2] if axis == 0 else out[:, start::2]
+        scratch = None
         for k, weight in enumerate(kernel):
             lo = base + first_tap + k
             chunk = coeffs[lo:lo + count] if axis == 0 else coeffs[:, lo:lo + count]
-            acc = weight * chunk if acc is None else acc + weight * chunk
-
-        if axis == 0:
-            out[start::2] = acc
-        else:
-            out[:, start::2] = acc
+            if k == 0:
+                np.multiply(chunk, weight, out=target)
+            elif weight == 1.0:
+                target += chunk
+            else:
+                if scratch is None:
+                    scratch = np.empty_like(target)
+                np.multiply(chunk, weight, out=scratch)
+                target += scratch
     return out

@@ -322,6 +322,14 @@ incidental, each found by a test that failed first:
   interpolation from approximation, which is what `test_measured_sites_survive_a_curved_field`
   is for.
 
+  At this array size **allocation dominates arithmetic**, so both the kernel
+  accumulation and the uint16 scaling write in place — into the output slice and one
+  reusable scratch buffer. The natural spellings (`acc = acc + weight * chunk`,
+  `clip(...) * 65535 + 0.5`) each allocate a couple of full-size temporaries per tap or
+  per channel, which is up to seven arrays of 60MP for the four-tap kernel and measured
+  ~35% of total merge time. Prefer in-place `np.multiply(..., out=)` and `+=` anywhere
+  in this path; the readable version is not free here the way it usually is.
+
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
 pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,
 3=G2 (second green in RGGB); black/white levels and active sensor area margins are
