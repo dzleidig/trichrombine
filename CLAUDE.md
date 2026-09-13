@@ -10,6 +10,30 @@ python -m pip install -e .
 
 Dependencies: `rawpy`, `tifffile`, `pyexiv2`, `numpy`, `pyserial`, `scipy`. Python 3.11+ — that floor comes from numpy/scipy/tifffile, which is why it can't go lower; development and CI run 3.14 (see `.tool-versions`), so 3.14 is the only version formally tested. The optional `gphoto` extra (`pip install -e ".[gphoto]"`) adds python-gphoto2, needed only for `--camera-backend gphoto2`; it also needs `libgphoto2` on the system.
 
+**Do not loosen the version floors in `pyproject.toml`.** `numpy`, `scipy` and `rawpy`
+are floored at the first release shipping official wheels for every supported Python,
+and that is a correctness constraint, not tidiness. Unfloored, `pip install -e .` on
+3.14 accepted an already-installed numpy 2.2.1 — a release predating 3.14 by a year,
+which pip had earlier built from source because no wheel existed. The resulting numpy
+returned silently wrong answers from `scipy.ndimage`: `measure_leader_level` read
+1008232 where it should read 1000, with arrays reading back values that could not
+coexist (a buffer holding squared values while the variance computed from it was
+correct). Nothing raised. Since that function sets the exposure target for a whole
+roll, it would have mis-exposed every frame rather than failing.
+
+The floors matter because pip leaves an *already-satisfied* requirement alone: with no
+floor a stale broken numpy survives `pip install -e .`, and with one it gets upgraded.
+Only the three that link numpy's C ABI carry floors; the rest are pure Python or do not
+touch numpy.
+
+To check an environment is sound, run the test suite — `test_leader.py` is what caught
+this, and it fails loudly on a broken stack. To verify no dependency needs a source
+build at all:
+
+```bash
+python -m pip install --only-binary=numpy,scipy,rawpy -e ".[dev]"
+```
+
 ## Hardware
 
 Sony A7R V, Sigma 105mm f/2.8 DG DN Macro (manual focus, f/8), JackW Big ScanLight
