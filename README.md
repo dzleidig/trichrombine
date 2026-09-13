@@ -9,6 +9,7 @@ time.
 - [Hardware](#hardware)
 - [Installation](#installation)
 - [Workflow](#workflow)
+- [Development](#development)
 
 ## Background
 
@@ -66,8 +67,11 @@ calibration before anything else:
 1. **LED warm-up** — ~5 minutes by default. LED output drifts as the light comes
    to temperature; calibrating cold and scanning warm means the numbers slide.
 2. **Flat fields** — you're prompted to remove the film holder (bare light only).
-   Several exposures per channel are averaged into a per-channel flat-field map,
-   used to correct light falloff for the rest of the session.
+   One probe frame per channel sets the LED power (shutter speed hasn't been
+   chosen yet at this point), then several exposures at that power are averaged
+   into a per-channel flat-field map, used to correct light falloff for the rest
+   of the session. A flat that comes out clipped or too dark is rejected rather
+   than used — either one quietly degrades every frame of the roll.
 3. **Leader positioning** — you're prompted to position the roll's own leader
    under the camera. Positioning can be loose: the leader-reading step masks out
    anything that isn't smooth film base, so dust, sprocket holes, and rough
@@ -110,3 +114,16 @@ DCP or camera color matrix — the file stays in sensor space, tagged with a lin
 ProPhoto-primaries ICC profile, and color characterization happens downstream in
 Capture One on the merged TIFF. Inversion happens in Capture One's Levels while
 the data is still linear; gamma encoding happens on export.
+
+## Development
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest
+```
+
+Tests cover the pure logic — merge math, ICC profile, leader measurement, shutter
+selection, flat-field build, session state — and run in under a second with no
+hardware. `trichrom-scan --dry-run` walks the whole flow (calibration and capture
+loop) without touching the camera or the light. `CLAUDE.md` documents the
+architecture and the items still unverified against the rig.

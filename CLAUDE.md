@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Setup
 
 ```bash
-pip install -e .
+python -m pip install -e .
 ```
 
 Dependencies: `rawpy`, `tifffile`, `pyexiv2`, `numpy`, `pyserial`, `scipy`. Python 3.14 (see `.tool-versions`). The optional `gphoto` extra (`pip install -e ".[gphoto]"`) adds python-gphoto2, needed only for `--camera-backend gphoto2`; it also needs `libgphoto2` on the system.
@@ -71,12 +71,30 @@ python -m pytest
 same interpreter the dependencies were installed into.)
 
 Tests cover the pure logic that fails *silently* — merge math, the ICC profile, leader
-measurement, shutter selection, session state. No hardware, no ARWs, sub-second. The
-camera backends and capture loop are deliberately untested: without a camera attached
-there's nothing meaningful to assert. No linting is configured.
+measurement, shutter selection, flat-field build, session state. No hardware, no ARWs,
+sub-second. The camera backends and capture loop are deliberately untested: without a
+camera attached there's nothing meaningful to assert. No linting is configured.
+
+For those untested paths, `--dry-run` is the other lever: it walks the full flow (new
+session → calibration → capture loop, plus `--resume` and `--recalibrate`) without
+touching hardware, so it catches wiring and argument regressions the unit tests can't
+see. Run it on both backends after changing anything in `scan.py`.
+
+Synthetic raw frames in tests should use **nonzero** sensor margins. Real bodies have
+them; zero-margin fixtures hide active-area crop mismatches, which is exactly the class
+of bug that passes here and breaks at the rig.
 
 When adding tests, check they actually catch a regression — break the thing on purpose
 and confirm the relevant test fails.
+
+Gotcha when doing that by mutating a *copy* of the source tree: `pyproject.toml` sets
+`pythonpath = ["src"]` under `[tool.pytest.ini_options]`, and that wins over the
+`PYTHONPATH` environment variable — so `PYTHONPATH=/tmp/mut python -m pytest` silently
+tests the real `src/` and every mutation "passes." Override the setting instead:
+
+```bash
+python -m pytest -o pythonpath=/tmp/mut
+```
 
 ## Project structure
 
@@ -107,12 +125,27 @@ computes the balance ratio directly (LED output is roughly linear with drive
 current) — the two stronger channels scale down to match the weakest, never up.
 Pass 2 (`adjust_exposure`) holds channel balance fixed and adjusts shutter speed
 alone, picking the nearest camera-supported shutter value by ratio each iteration,
-capped at `--max-exposure-iterations`. Flats are captured first (`capture_flats`,
-holder off, bare light, averaged over `--flat-shots` exposures per channel) since
-flat-field correction must be applied before any leader reading is trusted. The
-capture loop (`run_capture_loop`) then fires R/G/B per frame and merges via
+capped at `--max-exposure-iterations`.
+
+Flats come before both passes (`capture_flats`, holder off, bare light, averaged
+over `--flat-shots` exposures per channel), and that ordering is forced: the leader
+readings both passes depend on are themselves flat-corrected. Which means the flats
+are shot *before* a shutter speed exists, so LED power — not shutter — is the
+exposure lever for them. `_probe_flat_power()` shoots one bare-light frame per
+channel, reads it with `flat_level()`, and scales power by direct ratio to land near
+`FLAT_TARGET`; the real flats then follow at that power. Same reasoning as pass 1:
+LED output is roughly linear with drive current, so no search loop is needed.
+
+The capture loop (`run_capture_loop`) then fires R/G/B per frame and merges via
 `lib/merge_tri.py`. Hardware (Scanlight + camera) connects once and is shared
 across both phases.
+
+Two conventions in the shooting helpers. `_shoot()` returns `None` on any failure
+(no file appeared, or it never settled) — in the capture loop that means one bad
+frame, logged as `incomplete` and skipped. Calibration can't shrug that off, so it
+calls `_require_shot()` instead, which turns a `None` into `sys.exit` with a message
+naming the phase; the alternative is a `None` deref surfacing several frames later
+inside rawpy. Both are no-ops under `--dry-run`, which returns `None` by design.
 
 **`lib/leader.py`** — measures the film-base signal robust to loose leader
 positioning: samples a central band, computes local variance via a single-pass
@@ -122,9 +155,19 @@ average out grain, then takes a high percentile (dust/hot pixels can't set the
 target).
 
 **`lib/flatfield.py`** — averages several per-channel exposures, extracts the
-matching Bayer plane(s) (green averages G+G2), heavily smooths with
-`uniform_filter` to kill flat-field grain without a polynomial model, and
-normalizes so the brightest point is 1.0.
+matching Bayer plane(s) (green averages G+G2), crops to the active sensor area
+through the same `extract` + `crop_half_res` path the signal uses (so flat and
+frame are the same shape — sensor margins are nonzero on real bodies), heavily
+smooths with `uniform_filter` to kill flat-field grain without a polynomial model,
+and normalizes so the brightest point is 1.0.
+
+Only the flat's *shape* is used, but the exposure it was shot at still decides
+whether that shape is any good: a clipped flat has a flat-topped falloff and
+under-corrects vignetting across the whole roll, and a dark one divides its own read
+noise into every frame. Neither announces itself in the output, so `build_channel_flat`
+raises outside `[FLAT_MIN, FLAT_MAX]` rather than returning a quietly bad flat.
+`flat_level()` reports the same fraction-of-usable-range measure for the probe in
+`scan.py` that aims at `FLAT_TARGET`.
 
 **`lib/merge_tri.py`** — for each of the three exposures, extracts only the
 matching CFA plane (red from the red exposure, etc.; green averages G+G2),
@@ -188,6 +231,11 @@ guarantees the file is fully written before anything reads it (calibration, flat
 and merge all read through this one path), and by holding until the file is done it
 keeps one trigger mapped to one file, which is what keeps filename→channel
 attribution correct.
+
+`wait_for_settle()` returns a bool, and a `False` must never be treated as success —
+a timeout means the file is most likely still being written, which is the exact case
+the guard exists to catch. `_shoot()` therefore discards the path and returns `None`;
+losing one frame beats merging a truncated raw.
 
 ## Open items
 
