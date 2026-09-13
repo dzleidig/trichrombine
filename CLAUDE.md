@@ -184,8 +184,20 @@ raises outside `[FLAT_MIN, FLAT_MAX]` rather than returning a quietly bad flat.
 **`lib/merge_tri.py`** — for each of the three exposures, extracts only the
 matching CFA plane (red from the red exposure, etc.; green averages G+G2),
 normalizes by `(white_level - black_level)`, divides by that channel's flat, and
-stacks into a linear `(h/2, w/2, 3)` TIFF — already effectively "demosaiced" since
-each output pixel came from one cleanly-lit photosite, no interpolation needed.
+stacks into a linear TIFF.
+
+`--resolution` picks what happens next, and the distinction is worth holding onto:
+three-shot removes the *spectral* mixing between channels but not the *spatial*
+sparsity of the CFA. Red is measured at a quarter of the photosites no matter which
+LED is lit, so the two options are `half` — emit one pixel per measured photosite,
+`(h/2, w/2, 3)`, nothing interpolated — or `full` (default), which reconstructs each
+channel from its own measured sites up to `(h, w, 3)`. `full` is a cleaner
+reconstruction than demosaicing a single Bayer frame, since no channel has
+contamination from the others to unpick, but it is still interpolation. Which one
+produced a file is recorded in the TIFF metadata and the sidecar; that is provenance,
+not trivia, since it decides what the file can honestly be compared against.
+
+Measured ~18s per frame at full resolution against ~3s at half, on a 61MP frame.
 
 ```mermaid
 flowchart LR
@@ -249,6 +261,27 @@ provenance travels with the roll if it's moved or archived. A separate small
 pointer file (`~/.trichrom/last_session`) records the most recently used session
 dir for `--resume`; losing it costs convenience. Per-frame status is recorded so a
 mid-roll merge failure identifies exactly which frames need redoing.
+
+**`lib/rawio.py`** — rawpy read plus the Bayer plane helpers. `upsample_bayer_plane()`
+carries the full-resolution path, and three things in it are load-bearing rather than
+incidental, each found by a test that failed first:
+
+- **Per-site offsets.** R, G, G2 and B sit at four different corners of the 2×2 cell.
+  Interpolating each as though it began at (0, 0) leaves the finished channels shifted
+  half an output pixel against each other — colour fringing on every edge of every
+  frame, and no error anywhere. `active_site_offsets()` also folds in `margin % 2`, so
+  an odd active-area margin shifts the phase correctly instead of silently.
+- **Odd-reflection padding.** Cubic splines ring at an array boundary (a linear ramp
+  reconstructs its first interpolated sample at 0.84 where it should read 1.0), and the
+  output grid runs half a sample past the last measured site, where clamping would hold
+  the edge value. Padding with `reflect_type='odd'` continues the edge gradient and
+  fixes both; padding with `'edge'` does not — a constant extension makes the spline
+  bend exactly where the real data starts.
+- **Tensor-product evaluation.** The mapping is separable, so it goes through
+  `RectBivariateSpline(...)(rows, cols, grid=True)` rather than `map_coordinates`.
+  Handing a regular grid to a scattered-point evaluator costs a meshgrid of two float64
+  arrays the size of the output — near a gigabyte at 61MP — and ran ~7× slower for
+  results identical to 1e-16.
 
 **`lib/scanner.py`** — Scanlight serial protocol (custom binary packets over
 pyserial) and ARW file watching. The Bayer channel index mapping is 0=R, 1=G, 2=B,

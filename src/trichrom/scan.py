@@ -409,7 +409,8 @@ def run_capture_loop(scanlight, camera, args, state, flats, levels):
             'shutter_speed': state['calibration']['shutter_speed'],
         }
         try:
-            peaks = merge_triplet(captured['R'], captured['G'], captured['B'], flats, output_path, meta)
+            peaks = merge_triplet(captured['R'], captured['G'], captured['B'], flats, output_path,
+                                  meta, full_resolution=args.resolution == 'full')
             print(f"  Frame {frame} -> {output_path}")
             for ch in CHANNELS:
                 print(f"    [{ch}] peak={peaks[ch]:.3f}")
@@ -442,6 +443,10 @@ def main():
     parser.add_argument('--port', help='Scanlight serial port (default: auto-detect)')
     parser.add_argument('--camera-backend', choices=sorted(CAMERA_BACKENDS), default='captureone',
                         help='How the shutter is fired (default: captureone)')
+    parser.add_argument('--resolution', choices=('full', 'half'), default='full',
+                        help='full interpolates each channel from its measured sites to the '
+                             'sensor\'s full pixel count; half emits one pixel per measured '
+                             'photosite, interpolating nothing (default: full)')
     parser.add_argument('--recalibrate', action='store_true', help='Force recalibration even if already calibrated')
     parser.add_argument('--dry-run', action='store_true', help='Print actions without touching hardware')
 

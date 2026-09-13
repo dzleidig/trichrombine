@@ -172,6 +172,34 @@ ProPhoto-primaries ICC profile, and color characterization happens downstream in
 Capture One on the merged TIFF. Inversion happens in Capture One's Levels while
 the data is still linear; gamma encoding happens on export.
 
+### Output resolution
+
+Three-shot capture removes the *spectral* mixing between channels, but not the
+*spatial* sparsity of the colour filter array: red is still only measured at a
+quarter of the photosites, whichever LED is lit. So there are two honest things to
+do with that, and `--resolution` picks between them.
+
+| | `--resolution full` (default) | `--resolution half` |
+|---|---|---|
+| Output | 9504 × 6336 (60MP) | 4752 × 3168 (15MP) |
+| Each pixel | measured where a photosite sat, interpolated between | every value measured, nothing inferred |
+| Merge time per frame | ~18s | ~3s |
+
+`full` reconstructs each channel from its own measured sites. Because each channel
+comes from its own exposure there is no cross-channel contamination to fight, so
+this is a cleaner reconstruction than demosaicing a single Bayer frame — but it is
+still interpolation, and the extra pixels are inferred rather than measured.
+
+`half` is the conservative option: one output pixel per photosite that was really
+read. Worth choosing if you want a file where every number came off the sensor, or
+if you'd rather not spend the extra merge time. It is not obviously the lesser
+choice — at 1:1 on 35mm, 15MP is already around 3350 ppi, which is close to what
+400-speed colour negative and an f/8 macro lens (f/16 effective at 1:1) actually
+resolve. On slow, fine-grained stock there is more to gain from `full`.
+
+Whichever you use is recorded in the TIFF metadata and the JSON sidecar, so a file
+never has to be guessed about later.
+
 ## Options
 
 `--watch-dir` is always required, and you need one of `--session-dir` or `--resume`.
@@ -190,6 +218,7 @@ Everything else has a working default — `trichrom-scan --help` prints the same
 | `--date DATE` | today | Session date, recorded in state. |
 | `--port PORT` | auto-detect | Scanlight serial port. Pass it if detection picks the wrong device. |
 | `--camera-backend NAME` | `captureone` | `captureone` or `gphoto2`. See [Hardware](#hardware) for why the default is what it is. |
+| `--resolution NAME` | `full` | `full` reconstructs each channel to the sensor's full pixel count; `half` emits one pixel per measured photosite and interpolates nothing. See [Output resolution](#output-resolution). |
 | `--recalibrate` | off | Force calibration even on a session that already has it. |
 | `--dry-run` | off | Walk the entire flow printing what it would do, touching no hardware. |
 

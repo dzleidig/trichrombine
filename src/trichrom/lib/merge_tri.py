@@ -20,7 +20,8 @@ import tifffile
 
 from .flatfield import apply_flat
 from .icc import build_linear_prophoto_icc
-from .rawio import crop_half_res, extract_led_channel_plane, read_raw
+from .rawio import (INTERPOLATION_ORDER, active_site_offsets, crop_half_res, extract_bayer_channel,
+                    extract_led_channel_plane, read_raw, upsample_bayer_plane)
 from .scanner import CHANNEL_BAYER_INDICES
 
 _ICC_PROFILE = None
@@ -33,17 +34,56 @@ def _icc_profile():
     return _ICC_PROFILE
 
 
-def _normalized_plane(raw, ch):
-    """Black-subtracted, white-scaled plane for one LED channel — fraction of
-    usable range (white_level - black_level), before any flat-field correction."""
-    plane = extract_led_channel_plane(raw['image'], raw['pattern'], CHANNEL_BAYER_INDICES[ch],
-                                       raw['black_level_per_channel'])
-    plane = crop_half_res(plane, raw['sizes'])
-    black = raw['black_level_per_channel'][CHANNEL_BAYER_INDICES[ch][0]]
-    return plane / (raw['white_level'] - black)
+def _channel_field(raw, ch, flat, full_resolution):
+    """
+    Normalized, flat-corrected signal for one LED channel, as a fraction of usable
+    range (white_level - black_level).
+
+    Half resolution keeps one output pixel per measured photosite: nothing is
+    interpolated, and every value in the result was really read off the sensor.
+
+    Full resolution interpolates each contributing sub-plane from the sites that
+    were really read, at their true positions in the 2x2 cell. Three-shot capture
+    removes the *spectral* mixing between channels but not the *spatial* sparsity
+    of the CFA — red is still only sampled at a quarter of the photosites — so the
+    missing three-quarters are reconstructed here. Because each channel comes from
+    its own exposure there is no cross-channel contamination to fight, which makes
+    this a cleaner reconstruction than demosaicing a single Bayer frame, but it is
+    still interpolation: the extra pixels are inferred, not measured.
+
+    The flat is applied before upsampling, on the half-resolution grid it was built
+    on. Flats are heavily smoothed by construction, so correcting then interpolating
+    and interpolating then correcting differ negligibly — and doing it this way
+    keeps flats from existing sessions usable unchanged.
+    """
+    indices = CHANNEL_BAYER_INDICES[ch]
+    black = raw['black_level_per_channel']
+    scale = raw['white_level'] - black[indices[0]]
+
+    if not full_resolution:
+        plane = crop_half_res(
+            extract_led_channel_plane(raw['image'], raw['pattern'], indices, black), raw['sizes'])
+        plane = plane / scale
+        return apply_flat(plane, flat) if flat is not None else plane
+
+    sizes = raw['sizes']
+    out_shape = (sizes.height, sizes.width)
+    fields = []
+    for idx in indices:
+        # float32 throughout: a full-resolution plane off a 61MP sensor is ~240MB
+        # at single precision and twice that at double, and three channels plus
+        # interpolation scratch have to be live at once.
+        sub, row_off, col_off = extract_bayer_channel(raw['image'], raw['pattern'], idx)
+        sub = crop_half_res(sub.astype(np.float32) - black[idx], sizes) / scale
+        if flat is not None:
+            sub = apply_flat(sub, flat)
+        fields.append(upsample_bayer_plane(sub, *active_site_offsets(row_off, col_off, sizes),
+                                           out_shape=out_shape))
+    return fields[0] if len(fields) == 1 else np.mean(fields, axis=0)
 
 
-def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta):
+def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
+                  full_resolution=False):
     """
     Build the RGB planes from their matching narrowband exposures, divide by
     flat-field, stack into a linear TIFF, and write a JSON sidecar alongside it.
@@ -59,17 +99,26 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta):
         'B': read_raw(blue_path),
     }
 
-    planes = {ch: _normalized_plane(raws[ch], ch) for ch in 'RGB'}
-    if flats:
-        planes = {ch: apply_flat(planes[ch], flats[ch]) for ch in 'RGB'}
+    planes = {ch: _channel_field(raws[ch], ch, flats[ch] if flats else None, full_resolution)
+              for ch in 'RGB'}
 
     peaks = {ch: float(np.percentile(planes[ch], 99)) for ch in 'RGB'}
 
-    stacked = np.clip(np.stack([planes['R'], planes['G'], planes['B']], axis=-1), 0, 1)
-    image = (stacked * 65535 + 0.5).astype(np.uint16)
+    # Filled a channel at a time rather than stacked: at full resolution a stacked
+    # float array of three 61MP channels is most of a gigabyte before it is scaled.
+    h, w = planes['R'].shape
+    image = np.empty((h, w, 3), dtype=np.uint16)
+    for i, ch in enumerate('RGB'):
+        image[..., i] = (np.clip(planes[ch], 0, 1) * 65535 + 0.5).astype(np.uint16)
 
     tiff_meta = dict(meta)
     tiff_meta['peaks'] = peaks
+    tiff_meta['output_resolution'] = 'full' if full_resolution else 'half'
+    # Whether these pixels were measured or reconstructed is provenance, not trivia:
+    # it decides what the file can honestly be compared against later.
+    tiff_meta['interpolation'] = (
+        f'per-channel cubic spline (order {INTERPOLATION_ORDER}) from measured sites'
+        if full_resolution else 'none — one output pixel per measured photosite')
     tiff_meta['camera_as_shot_wb_recorded_not_applied'] = {
         ch: raws[ch]['camera_whitebalance'] for ch in 'RGB'
     }
