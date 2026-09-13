@@ -21,7 +21,6 @@ PKT_H2D_SET_COLOR = 0x00
 # Bayer channel indices contributing to each LED channel: green averages both
 # green photosite positions (1=G, 3=G2 in RGGB) for full-resolution-matched planes.
 CHANNEL_BAYER_INDICES = {'R': (0,), 'G': (1, 3), 'B': (2,)}
-OFF = (0, 0, 0, 0, 0)
 
 
 def _build_set_color_packet(r, g, b, w, ir, brightness):

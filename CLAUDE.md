@@ -136,9 +136,21 @@ channel, reads it with `flat_level()`, and scales power by direct ratio to land 
 `FLAT_TARGET`; the real flats then follow at that power. Same reasoning as pass 1:
 LED output is roughly linear with drive current, so no search loop is needed.
 
+Before any of it, `warm_up()` cycles R/G/B one channel at a time at
+`--start-power`. Cycling is the point, not incidental: scanning only ever has one
+narrowband LED lit, so warming all three (or any of them at full power) settles the
+board hotter than it ever gets in use, and calibrating against that overshoot means
+the light cools toward its real operating point across the roll — the same drift
+warm-up exists to prevent, with the sign flipped.
+
 The capture loop (`run_capture_loop`) then fires R/G/B per frame and merges via
-`lib/merge_tri.py`. Hardware (Scanlight + camera) connects once and is shared
-across both phases.
+`lib/merge_tri.py`. Between frames it drops to `set_preview_light()` so the operator
+can see the frame while advancing film; without that the light would sit on whichever
+channel fired last. Hardware (Scanlight + camera) connects once and is shared across
+both phases.
+
+All three of those go through `light_channel()` / `set_preview_light()` rather than
+raw `set_color()` calls, so "exactly one channel lit" stays a single decision.
 
 Two conventions in the shooting helpers. `_shoot()` returns `None` on any failure
 (no file appeared, or it never settled) — in the capture loop that means one bad

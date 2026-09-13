@@ -44,7 +44,7 @@ from .lib.flatfield import FLAT_TARGET, build_channel_flat, flat_level
 from .lib.leader import measure_leader_level
 from .lib.merge_tri import merge_triplet
 from .lib.rawio import crop_half_res, extract_led_channel_plane, read_raw
-from .lib.scanner import CHANNEL_BAYER_INDICES, OFF, Scanlight, find_scanlight_port, wait_for_new_file
+from .lib.scanner import CHANNEL_BAYER_INDICES, Scanlight, find_scanlight_port, wait_for_new_file
 from .lib.shutter import nearest_shutter_choice, shutter_str_to_seconds
 
 CHANNELS = 'RGB'
@@ -52,6 +52,9 @@ CHANNELS = 'RGB'
 CHANNEL_SLOT = {'R': 0, 'G': 1, 'B': 2}
 TARGET_LOW, TARGET_HIGH = 0.80, 0.90
 SETTLE_SECONDS = 1.0
+# How long each channel holds during warm-up. Roughly one capture's dwell, so the
+# board sees the same on/off rhythm it will during the roll.
+WARMUP_DWELL_SECONDS = 3.0
 CAMERA_BACKENDS = {'captureone': captureone, 'gphoto2': gphoto}
 
 
@@ -83,10 +86,22 @@ def wait_for_settle(path, timeout=10.0, min_age_seconds=SETTLE_SECONDS):
     return False
 
 
-def _shoot(scanlight, camera, args, ch, level):
+def light_channel(scanlight, ch, level):
+    """Turn on exactly one narrowband channel; the other two go dark."""
     rgb = [0, 0, 0]
     rgb[CHANNEL_SLOT[ch]] = level
     scanlight.set_color(*rgb, 0, 0, 255)
+
+
+def set_preview_light(scanlight, args):
+    """Low white-equivalent level for eyeballing the frame while advancing film.
+    Without this the light sits on whichever channel happened to fire last."""
+    pb = args.preview_brightness
+    scanlight.set_color(pb, pb, pb, 0, 0, 255)
+
+
+def _shoot(scanlight, camera, args, ch, level):
+    light_channel(scanlight, ch, level)
     time.sleep(args.stabilize)
 
     try:
@@ -280,11 +295,41 @@ def adjust_exposure(scanlight, camera, args, powers, flats):
     return args.cam.get_shutter_speed(camera), peaks
 
 
+def warm_up(scanlight, args, dwell=WARMUP_DWELL_SECONDS):
+    """
+    Run the LEDs at the load they'll actually see while scanning, so calibration
+    lands on the thermal steady state the roll will run at.
+
+    Cycling one channel at a time is the substance of this, not a detail. Scanning
+    only ever has a single narrowband LED on, so warming all three together — or
+    any of them at full power — settles the board hotter than it will ever get in
+    use, and calibrating against that overshoot means the light cools toward its
+    real operating point over the roll. That is the same drift warm-up exists to
+    prevent, just with the sign flipped. `--start-power` is the closest available
+    stand-in for the scanning power, since it's what pass 1 is about to shoot at
+    and the calibrated powers only go down from there.
+    """
+    print(f"Warming up LEDs for {args.warmup_seconds:.0f}s — cycling R/G/B at power "
+          f"{args.start_power}, matching the load while scanning.")
+    deadline = time.monotonic() + args.warmup_seconds
+    next_report = time.monotonic() + 30
+
+    while True:
+        for ch in CHANNELS:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print()
+                return
+            light_channel(scanlight, ch, args.start_power)
+            if time.monotonic() >= next_report:
+                print(f"  {remaining:.0f}s remaining...")
+                next_report += 30
+            time.sleep(min(dwell, remaining))
+
+
 def run_calibration(scanlight, camera, args, state, session_dir):
     if not args.skip_warmup and not args.dry_run:
-        print(f"Warming up LEDs for {args.warmup_seconds:.0f}s...")
-        time.sleep(args.warmup_seconds)
-        print()
+        warm_up(scanlight, args)
 
     if args.skip_flats and state.get('flats'):
         flat_paths = {ch: Path(p) for ch, p in state['flats'].items()}
@@ -340,6 +385,7 @@ def run_capture_loop(scanlight, camera, args, state, flats, levels):
     frame = len(state['frames']) + 1
 
     while True:
+        set_preview_light(scanlight, args)
         try:
             input(f"Frame {frame} — press Enter to capture (Ctrl+C to quit)...")
         except EOFError:
@@ -493,8 +539,7 @@ def main():
         if failed:
             print(f"{len(failed)} frame(s) need redoing: {[f['frame'] for f in failed]}")
     finally:
-        pb = args.preview_brightness
-        scanlight.set_color(pb, pb, pb, 0, 0, 255)
+        set_preview_light(scanlight, args)
         scanlight.close()
         args.cam.close_camera(camera)
 

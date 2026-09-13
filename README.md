@@ -93,7 +93,7 @@ flowchart TD
 
     subgraph CAL["Calibration — once per roll"]
         direction LR
-        C1["<b>1.</b> LED<br/>warm-up<br/><i>~5 min</i>"] --> C2["<b>2.</b> Flat fields<br/><i>holder off,<br/>bare light</i>"] --> C3["<b>3.</b> Position<br/>the leader<br/><i>loose is fine</i>"] --> C4["<b>4.</b> Channel<br/>balance<br/><i>one shot each</i>"] --> C5["<b>5.</b> Exposure<br/><i>shutter speed<br/>alone</i>"]
+        C1["<b>1.</b> LED warm-up<br/><i>~5 min, cycling<br/>R/G/B</i>"] --> C2["<b>2.</b> Flat fields<br/><i>holder off,<br/>bare light</i>"] --> C3["<b>3.</b> Position<br/>the leader<br/><i>loose is fine</i>"] --> C4["<b>4.</b> Channel<br/>balance<br/><i>one shot each</i>"] --> C5["<b>5.</b> Exposure<br/><i>shutter speed<br/>alone</i>"]
     end
 
     CAL --> SAVE[("session.json")]
@@ -116,6 +116,11 @@ calibration before anything else:
 
 1. **LED warm-up** — ~5 minutes by default. LED output drifts as the light comes
    to temperature; calibrating cold and scanning warm means the numbers slide.
+   The warm-up cycles R/G/B one channel at a time at `--start-power`, deliberately
+   *not* all three at full: scanning only ever has one narrowband LED on, so
+   warming hotter than that would settle the board somewhere it never sits in use,
+   and the light would cool back toward its real operating point across the roll —
+   the same drift, just in the other direction.
 2. **Flat fields** — you're prompted to remove the film holder (bare light only).
    One probe frame per channel sets the LED power (shutter speed hasn't been
    chosen yet at this point), then several exposures at that power are averaged
