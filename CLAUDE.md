@@ -174,6 +174,25 @@ matching CFA plane (red from the red exposure, etc.; green averages G+G2),
 normalizes by `(white_level - black_level)`, divides by that channel's flat, and
 stacks into a linear `(h/2, w/2, 3)` TIFF — already effectively "demosaiced" since
 each output pixel came from one cleanly-lit photosite, no interpolation needed.
+
+```mermaid
+flowchart LR
+    R["R exposure<br/><i>red LED only</i>"] --> RP["CFA plane 0"]
+    G["G exposure"] --> GP["planes 1 + 3<br/>averaged"]
+    B["B exposure"] --> BP["CFA plane 2"]
+
+    RP --> RN["crop to active area<br/>÷ (white − black)"] --> RF["÷ flat R"] --> S
+    GP --> GN["crop to active area<br/>÷ (white − black)"] --> GF["÷ flat G"] --> S
+    BP --> BN["crop to active area<br/>÷ (white − black)"] --> BF["÷ flat B"] --> S
+
+    S["stack → (h/2, w/2, 3)"] --> TIFF[("linear 16-bit TIFF<br/>+ linear-ProPhoto ICC")]
+    S --> JSON[("JSON sidecar")]
+```
+
+The three columns never mix — that is the whole point of shooting trichromatically.
+There is no crosstalk term because no pixel ever saw two LEDs, and no demosaic step
+because every output pixel is one real photosite rather than an interpolation of its
+neighbours.
 Unity white balance throughout: the camera's per-channel as-shot WB guess is
 recorded in metadata as documentation only, never applied. No lens/vignetting
 correction and no DCP/camera color matrix — sensor space is preserved for

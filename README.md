@@ -28,7 +28,30 @@ The cost is speed — three exposures per frame instead of one.
 - Negative Supply 35mm MK2 holder on a Kaiser RS1 copy stand
 - Capture One for tethering, live view and shutter triggering (macOS, AppleScript)
 
-Capture One owns the camera end to end: it holds the tether for live view and focus
+```mermaid
+flowchart LR
+    T["<b>trichrom-scan</b><br/><i>drives the sequence</i>"]
+    SL["Big ScanLight<br/>R / G / B"]
+    CAM["Sony A7R V"]
+    C1["Capture One"]
+    WD[("--watch-dir<br/>ARWs")]
+    OUT[("linear TIFF<br/>+ JSON sidecar")]
+
+    T -->|"USB serial:<br/>one LED on"| SL
+    SL -.->|"narrowband light,<br/>through the negative"| CAM
+    T -->|"AppleScript:<br/>capture"| C1
+    C1 -->|"USB tether —<br/>sole owner"| CAM
+    CAM -->|"ARW"| C1
+    C1 -->|"writes"| WD
+    WD ==>|"trichrom-scan reads the<br/>triplet back and merges it"| OUT
+```
+
+The thing to notice: **`trichrom-scan` never talks to the camera.** It drives the
+light directly over serial, but the shutter goes through Capture One, and the ARWs
+come back by watching a folder rather than over any direct connection.
+
+That's deliberate. Capture One owns the camera end to end: it holds the tether for
+live view and focus
 magnification (focus is set once per session — the lens is focus-by-wire — and never
 touched mid-roll), writes the ARWs, and fires the shutter on our behalf via
 AppleScript. Sony's PC Remote connection allows one controlling host at a time, so
@@ -58,6 +81,33 @@ trichrom-scan --session-dir /path/to/session --watch-dir /path/to/captures \
 
 Merged TIFFs land in `--watch-dir` by default, alongside the ARWs; pass
 `--output-dir` to write them somewhere else instead.
+
+One launch covers the whole roll — calibration runs itself if the session needs it,
+then you stay in the capture loop until you Ctrl+C:
+
+```mermaid
+flowchart TD
+    START(["trichrom-scan --session-dir ... --watch-dir ..."]) --> Q{"Session already<br/>calibrated?"}
+    Q -->|"new session · --recalibrate ·<br/>you accept the stale-calibration prompt"| CAL
+    Q -->|"--resume, calibration still fresh"| LOOP
+
+    subgraph CAL["Calibration — once per roll"]
+        direction LR
+        C1["<b>1.</b> LED<br/>warm-up<br/><i>~5 min</i>"] --> C2["<b>2.</b> Flat fields<br/><i>holder off,<br/>bare light</i>"] --> C3["<b>3.</b> Position<br/>the leader<br/><i>loose is fine</i>"] --> C4["<b>4.</b> Channel<br/>balance<br/><i>one shot each</i>"] --> C5["<b>5.</b> Exposure<br/><i>shutter speed<br/>alone</i>"]
+    end
+
+    CAL --> SAVE[("session.json")]
+    SAVE --> LOOP
+
+    subgraph LOOP["Capture loop — repeat until Ctrl+C"]
+        direction LR
+        L1["Advance film ·<br/>check framing"] --> L2["Press Enter<br/><i>or footswitch</i>"] --> L3["R → G → B<br/>fire in sequence"] --> L4["Merge → TIFF<br/>+ JSON sidecar"] --> L5["Peaks print<br/><i>drift check</i>"]
+        L5 -.->|"next frame"| L1
+    end
+```
+
+The five calibration steps are detailed just below; the capture loop is the part you
+actually live in for the rest of the roll.
 
 ### Calibration (automatic on a new session)
 
