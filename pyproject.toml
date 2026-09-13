@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=65", "wheel"]
+# 77 is the floor for PEP 639 (SPDX `license` string + `license-files`), used below.
+# `wheel` is not listed: setuptools has vendored it since 70.1.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,8 +9,11 @@ name = "trichrom"
 version = "0.1.0"
 description = "Trichromatic (3-shot) RGB film scanning via Scanlight + Sony A7R V"
 readme = "README.md"
-requires-python = ">=3.8"
-license = {text = "MIT"}
+# numpy, scipy and tifffile all floor at 3.11, so anything lower cannot resolve.
+# Development and CI run 3.14 (see .tool-versions); 3.11 is the tested lower bound.
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "Dylan Leidig", email = "dzleidig@gmail.com"}
 ]
