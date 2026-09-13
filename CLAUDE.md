@@ -94,8 +94,9 @@ python -m pytest
 (`python -m` rather than the bare `pytest` script guarantees the tests run under the
 same interpreter the dependencies were installed into.)
 
-Tests cover the pure logic that fails *silently* — merge math, the ICC profile, leader
-measurement, shutter selection, flat-field build, session state. No hardware, no ARWs,
+Tests cover the pure logic that fails *silently* — merge math, channel verification,
+full-resolution reconstruction, the ICC profile, leader measurement, shutter selection,
+flat-field build, LED warm-up, session state. No hardware, no ARWs,
 sub-second. The camera backends and capture loop are deliberately untested: without a
 camera attached there's nothing meaningful to assert. No linting is configured.
 
@@ -239,14 +240,20 @@ flowchart LR
     GP --> GN["crop to active area<br/>÷ (white − black)"] --> GF["÷ flat G"] --> S
     BP --> BN["crop to active area<br/>÷ (white − black)"] --> BF["÷ flat B"] --> S
 
-    S["stack → (h/2, w/2, 3)"] --> TIFF[("linear 16-bit TIFF<br/>+ linear-ProPhoto ICC")]
-    S --> JSON[("JSON sidecar")]
+    S{"--resolution"}
+    S -->|half| HALF["stack → (h/2, w/2, 3)<br/><i>every value measured</i>"]
+    S -->|full| FULL["reconstruct each channel<br/>from its own sites<br/>→ (h, w, 3)"]
+    HALF --> TIFF[("linear 16-bit TIFF<br/>+ linear-ProPhoto ICC")]
+    FULL --> TIFF
+    TIFF --> JSON[("JSON sidecar")]
 ```
 
-The three columns never mix — that is the whole point of shooting trichromatically.
-There is no crosstalk term because no pixel ever saw two LEDs, and no demosaic step
-because every output pixel is one real photosite rather than an interpolation of its
-neighbours.
+The three columns never mix, which is the whole point of shooting trichromatically:
+there is no crosstalk term because no pixel ever saw two LEDs, and no *cross-channel*
+demosaic because nothing a channel needs is ever taken from another one. That holds at
+either resolution. What differs is within a column — `half` emits only photosites that
+were really read, while `full` fills the gaps between them from that same channel's
+measured sites.
 Unity white balance throughout: the camera's per-channel as-shot WB guess is
 recorded in metadata as documentation only, never applied. No lens/vignetting
 correction and no DCP/camera color matrix — sensor space is preserved for
@@ -410,6 +417,23 @@ guesswork (see the `lib/scanner.py` note above). The mechanism is undocumented a
 is unverified whether it fires *after* the file is fully written, so keep the settle
 check as a guard. Worth doing once the trigger path is proven, or sooner if
 `wait_for_new_file` + settle proves flaky in practice.
+
+**Full-resolution reconstruction has never seen real film.** `--resolution full` is the
+default and its maths is well covered by tests, but no frame of actual negative has gone
+through it. What to watch for at the rig: cubic ringing on genuinely hard edges —
+sprocket holes, the film edge, a dust speck — and whether the extra pixels resolve
+anything the film actually holds. Shoot one frame both ways and compare before trusting
+it for a roll. `--resolution half` exists precisely as the fallback, and is why it
+should not be removed until `full` has been proven on film.
+
+**`MIN_DOMINANCE` is a guess, and the data to replace it is already being captured.**
+It sits at a conservative 2.0 because the CFA's transmission at the LED wavelengths has
+never been measured on this body. Calibration's flats are bare-light, one LED at a time —
+running `channel_means()` on one is exactly that measurement. Recording the real ratios
+in `session.json` would let the threshold come from the rig instead of a guess, and would
+double as a check on the light source itself. The same measurement answers a separate
+question: whether the attenuated non-matching photosites carry enough signal to be worth
+using in reconstruction, or are too far down to bother with.
 
 **EXIF embedding is unverified but non-fatal.** Whether pyexiv2 writes the preserved
 EXIF cleanly into the tifffile-produced TIFF — and whether the `Exif.Sony2.*`

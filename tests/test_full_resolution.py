@@ -16,7 +16,6 @@ every edge of every frame and raises no error at all.
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
 from trichrom.lib import merge_tri
 

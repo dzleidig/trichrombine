@@ -3,12 +3,18 @@ Merge a trichromatic (3-shot) R/G/B ARW triplet into a linear TIFF.
 
 Each exposure carries one clean narrowband channel, and only the matching CFA
 plane is ever read from each file — so there is no LED crosstalk to correct.
-Unity white balance throughout: with no cross-channel
-interpolation to assist it, and no meaningful single-channel as-shot value, the
-camera's per-channel WB guess is recorded in metadata as documentation only and
-never applied. No lens/vignetting correction (flats handle falloff) and no DCP or
-camera color matrix — the file stays in sensor space; color characterization
-happens downstream in Capture One on the merged TIFF.
+
+Which LED actually lit each frame is read back from the pixels before anything is
+merged, rather than trusted from the filename. `full_resolution` then decides whether
+the output keeps one pixel per measured photosite or reconstructs each channel to the
+sensor's full pixel count; either way the choice is recorded in the file.
+
+Unity white balance throughout: with no cross-channel interpolation to assist it, and
+no meaningful single-channel as-shot value, the camera's per-channel WB guess is
+recorded in metadata as documentation only and never applied. No lens/vignetting
+correction (flats handle falloff) and no DCP or camera color matrix — the file stays
+in sensor space; color characterization happens downstream in Capture One on the
+merged TIFF.
 """
 
 import json
@@ -92,7 +98,7 @@ def _channel_field(raw, ch, flat, full_resolution):
 
 
 def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
-                  full_resolution=False):
+                  *, full_resolution):
     """
     Build the RGB planes from their matching narrowband exposures, divide by
     flat-field, stack into a linear TIFF, and write a JSON sidecar alongside it.
@@ -101,6 +107,11 @@ def merge_triplet(red_path, green_path, blue_path, flats, output_path, meta,
     channel levels, shutter speed) plus this frame's source filenames — all of
     it also lands in the JSON sidecar; a copy travels in the TIFF description.
     Returns the per-channel 99th-percentile peak, for the drift-check report.
+
+    full_resolution is keyword-only and has no default on purpose: it decides
+    whether the pixels in the result were measured or inferred, which is the one
+    thing a reader of the file most needs to know. Inheriting it from a default
+    would let a caller answer that question without realising it was asked.
     """
     raws = {
         'R': read_raw(red_path),

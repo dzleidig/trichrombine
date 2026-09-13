@@ -49,7 +49,8 @@ def patched(monkeypatch):
 
 def _merge(tmp_path, meta=None):
     out = tmp_path / 'frame.tiff'
-    peaks = merge_tri.merge_triplet('R', 'G', 'B', None, out, meta or {'roll_id': 'r1'})
+    peaks = merge_tri.merge_triplet('R', 'G', 'B', None, out, meta or {'roll_id': 'r1'},
+                                    full_resolution=False)
     return out, peaks
 
 
@@ -94,7 +95,7 @@ def test_flat_field_division_is_applied(patched, tmp_path):
     """Halving the flat should double the recovered signal."""
     half = {ch: np.full((SIZE // 2, SIZE // 2), 0.5, dtype=np.float32) for ch in 'RGB'}
     out = tmp_path / 'flat.tiff'
-    peaks = merge_tri.merge_triplet('R', 'G', 'B', half, out, {'roll_id': 'r1'})
+    peaks = merge_tri.merge_triplet('R', 'G', 'B', half, out, {'roll_id': 'r1'}, full_resolution=False)
     assert peaks['R'] == pytest.approx(2 * 8000 / (WHITE - BLACK[0]), rel=1e-3)
 
 
@@ -134,7 +135,7 @@ def test_clips_rather_than_wrapping_on_overflow(monkeypatch, tmp_path):
 
     import tifffile
     out = tmp_path / 'clip.tiff'
-    merge_tri.merge_triplet('R', 'G', 'B', None, out, {'roll_id': 'r1'})
+    merge_tri.merge_triplet('R', 'G', 'B', None, out, {'roll_id': 'r1'}, full_resolution=False)
     assert tifffile.imread(str(out)).max() == 65535
 
 
@@ -147,7 +148,7 @@ def test_merge_refuses_a_mis_attributed_triplet(monkeypatch, tmp_path):
 
     out = tmp_path / 'swapped.tiff'
     with pytest.raises(ValueError, match="mis-attributed"):
-        merge_tri.merge_triplet('R', 'G', 'B', None, out, {'roll_id': 'r1'})
+        merge_tri.merge_triplet('R', 'G', 'B', None, out, {'roll_id': 'r1'}, full_resolution=False)
     assert not out.exists(), "a refused frame must not leave a file behind"
 
 
