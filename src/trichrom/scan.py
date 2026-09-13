@@ -447,7 +447,8 @@ def main():
 
     calib = parser.add_argument_group('calibration tuning', 'Defaults are usually fine.')
     calib.add_argument('--start-power', type=int, default=200, metavar='N',
-                       help='Starting LED power 0-255 for channel balance (default: 200)')
+                       help='LED power 0-255 for the warm-up cycle and the channel-balance '
+                            'pass; balance only scales down from here (default: 200)')
     calib.add_argument('--flat-brightness', type=int, default=180, metavar='N',
                        help='Starting LED brightness 0-255 for the flat-field probe, which '
                             'then scales it to hit the target exposure (default: 180)')
