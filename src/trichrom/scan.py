@@ -206,7 +206,13 @@ def capture_flats(scanlight, camera, args, session_dir):
     read noise into every frame, and neither announces itself in the output.
     """
     print("=== Flat fields ===")
-    print("Remove the film holder — bare light only — before continuing.\n")
+    # Actually wait. Said "before continuing" and then continued, so the flats were shot
+    # through the holder — baking its vignetting and edges into the correction applied to
+    # every frame of the roll, which looks like a plausible flat and is not one.
+    print("Remove the film holder — bare light only — then press Enter...")
+    if not args.dry_run:
+        input()
+    print()
     flats_dir = session_dir / 'flats'
     flats_dir.mkdir(parents=True, exist_ok=True)
 

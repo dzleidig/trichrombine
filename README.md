@@ -123,7 +123,9 @@ calibration before anything else:
    warming hotter than that would settle the board somewhere it never sits in use,
    and the light would cool back toward its real operating point across the roll —
    the same drift, just in the other direction.
-2. **Flat fields** — you're prompted to remove the film holder (bare light only).
+2. **Flat fields** — you're prompted to remove the film holder (bare light only)
+   and it waits for you; flats shot through the holder would bake its edges and
+   vignetting into every frame's correction.
    One probe frame per channel sets the LED power (shutter speed hasn't been
    chosen yet at this point), then several exposures at that power are averaged
    into a per-channel flat-field map, used to correct light falloff for the rest

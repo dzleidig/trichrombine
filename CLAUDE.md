@@ -158,7 +158,12 @@ readings both passes depend on are themselves flat-corrected. Which means the fl
 are shot *before* a shutter speed exists, so LED power — not shutter — is the
 exposure lever for them. `_probe_flat_power()` shoots one bare-light frame per
 channel, reads it with `flat_level()`, and scales power by direct ratio to land near
-`FLAT_TARGET`; the real flats then follow at that power. Same reasoning as pass 1:
+`FLAT_TARGET`; the real flats then follow at that power.
+
+`capture_flats()` blocks on `input()` before any of that, and the *order* is the point:
+it used to print "remove the film holder ... before continuing" and then continue, so
+the flats were shot through the holder and its edges went into the correction divided
+into every frame. A flat like that looks entirely plausible. Same reasoning as pass 1:
 LED output is roughly linear with drive current, so no search loop is needed.
 
 Before any of it, `warm_up()` cycles R/G/B one channel at a time at
